@@ -47,7 +47,6 @@ HomeTab::HomeTab() {
     this->fnOSGrid = new RecyclingGrid();
     this->fnOSGrid->setGrow(1.0f);
     this->fnOSGrid->estimatedRowHeight = 300;
-    this->fnOSGrid->estimatedRowWidth  = 175;
     this->fnOSGrid->spanCount          = brls::getStyle().getMetric("app/grid/5");
     this->fnOSGrid->registerCell("Cell", VideoCardCell::create);
     this->fnOSGrid->setVisibility(brls::Visibility::GONE);
