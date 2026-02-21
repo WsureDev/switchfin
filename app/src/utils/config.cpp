@@ -527,7 +527,7 @@ void AppConfig::save() {
 
 bool AppConfig::checkLogin() {
     for (auto& s : this->servers) {
-        if (s.id.empty() && s.urls.size() > 0 && s.type != "fntv") {
+        if (s.id.empty() && !s.urls.empty() && s.type != "fntv") {
             try {
                 std::string url = s.urls.front() + jellyfin::apiPublicInfo;
                 std::string resp = HTTP::get(url, HTTP::Timeout{3000});
@@ -538,7 +538,7 @@ bool AppConfig::checkLogin() {
                 brls::Logger::warning("AppConfig {} checkServer: {}", s.urls.front(), ex.what());
                 return false;
             }
-        } else if (s.id.empty() && s.urls.size() > 0 && s.type == "fntv") {
+        } else if (s.id.empty() && !s.urls.empty() && s.type == "fntv") {
             // fnOS servers use their URL as the stable ID
             s.id = s.urls.front();
         }

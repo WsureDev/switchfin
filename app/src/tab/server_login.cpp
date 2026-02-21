@@ -100,7 +100,7 @@ ServerLogin::ServerLogin(const std::string& name, const std::string& url, const 
 
     this->hdrSigin->setTitle(brls::getStr("main/setting/server/sigin_to", name));
     this->inputUser->init("main/setting/username"_i18n, user);
-    this->inputPass->init("main/setting/password"_i18n, "", [](std::string text) {}, "", "", 256);
+    this->inputPass->init("main/setting/password"_i18n, "", []([[maybe_unused]] std::string text) {}, "", "", 256);
 
     this->btnSignin->registerClickAction([this](...) { return this->onSignin(); });
     this->btnQuickConnect->setVisibility(brls::Visibility::GONE);

@@ -460,7 +460,7 @@ void PlayerView::reportStart() {
         int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().playback_time * 1000.0);
         fnos::postJSON<nlohmann::json>(
             {{"item_guid", this->itemId}, {"ts", ts_ms}},
-            [](const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
         return;
     }
     uint64_t ticks = MPVCore::instance().playback_time * jellyfin::PLAYTICKS;
@@ -481,7 +481,7 @@ void PlayerView::reportStop() {
         int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().playback_time * 1000.0);
         fnos::postJSON<nlohmann::json>(
             {{"item_guid", this->itemId}, {"ts", ts_ms}},
-            [](const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
         brls::Logger::debug("PlayerView reportStop fnOS {}", this->itemId);
         this->playSessionId.clear();
         return;
@@ -507,7 +507,7 @@ void PlayerView::reportPlay(bool isPaused) {
         int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().video_progress * 1000.0);
         fnos::postJSON<nlohmann::json>(
             {{"item_guid", this->itemId}, {"ts", ts_ms}},
-            [](const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
         return;
     }
     uint64_t ticks = MPVCore::instance().video_progress * jellyfin::PLAYTICKS;
@@ -611,7 +611,7 @@ bool PlayerView::toggleQuality() {
     if (videoBitRate >= 6000000) options.push_back("8 Mbps"), values.push_back(8000000);
     if (videoBitRate >= 4000000) options.push_back("6 Mbps"), values.push_back(6000000);
     if (videoBitRate >= 3000000) options.push_back("4 Mbps"), values.push_back(4000000);
-    if (videoBitRate >= 1500000) options.push_back("3 Mbps"), values.push_back(1500000);
+    if (videoBitRate >= 1500000) options.push_back("3 Mbps"), values.push_back(3000000);
     if (videoBitRate >= 720000) options.push_back("1.5 Mbps"), values.push_back(1500000);
     options.push_back("720 kbps"), values.push_back(720000);
     options.push_back("420 kbps"), values.push_back(420000);

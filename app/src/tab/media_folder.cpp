@@ -126,7 +126,8 @@ public:
             cell->labelTitle->setVisibility(brls::Visibility::GONE);
             cell->picture->setVisibility(brls::Visibility::VISIBLE);
         } else {
-            cell->labelTitle->setText(item.title.empty() ? item.tv_title : item.title);
+            cell->labelTitle->setText(item.title.empty() ? item.tv_title  // tv_title is the series name for episodes
+                                                          : item.title);
             cell->labelTitle->setVisibility(brls::Visibility::VISIBLE);
             cell->picture->setVisibility(brls::Visibility::GONE);
         }
