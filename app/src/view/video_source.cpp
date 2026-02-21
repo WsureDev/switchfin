@@ -33,7 +33,7 @@ RecyclingGridItem* VideoDataSource::cellForRow(RecyclingView* recycler, size_t i
         if (!tag.empty() && tag[0] == '/') {
             Image::with(cell->picture, AppConfig::instance().getUrl() + tag);
         } else {
-            Image::load(cell->picture, fmt::runtime(fmt_str), id,
+            Image::load(cell->picture, fmt_str, id,
                 HTTP::encode_form({{"tag", tag}, {"maxWidth", "325"}}));
         }
     };
