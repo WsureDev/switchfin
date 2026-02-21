@@ -249,7 +249,8 @@ void PlayerView::reportStop() {
 }
 
 void PlayerView::reportPlay(bool isPaused) {
-    if (isPaused) return;  // Only report progress while playing, not on pause
+    // fnOS play/record only records position; pause state is not a separate API call.
+    if (isPaused) return;
     int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().video_progress * 1000.0);
     fnos::postJSON<nlohmann::json>(
         {{"item_guid", this->itemId}, {"ts", ts_ms}},

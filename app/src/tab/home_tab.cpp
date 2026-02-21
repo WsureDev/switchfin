@@ -38,7 +38,7 @@ brls::View* HomeTab::create() { return new HomeTab(); }
 void HomeTab::doRequest() { this->onCreate(); }
 
 void HomeTab::onCreate() {
-    auto actionRefresh = [this](brls::View* /*view*/) {
+    auto actionRefresh = [this]([[maybe_unused]] brls::View* view) {
         this->fnOSGrid->showSkeleton();
         this->doRequest();
         return true;

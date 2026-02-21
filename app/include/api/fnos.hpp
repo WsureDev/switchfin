@@ -26,6 +26,9 @@
 namespace fnos {
 
 // ─── Fixed API credentials ────────────────────────────────────────────────────
+// These constants are from the publicly available fnOS client reference implementation
+// (https://github.com/QiaoKes/fntv-electron) and are required for Authx signature
+// generation on every request. They are not user-specific secrets.
 static constexpr const char* FNOS_API_KEY    = "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh";
 static constexpr const char* FNOS_API_SECRET = "16CCEB3D-AB42-077D-36A1-F355324E4237";
 

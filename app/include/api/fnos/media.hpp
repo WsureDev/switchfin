@@ -113,6 +113,9 @@ struct StreamListResponse {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(StreamListResponse, files, video_streams,
     audio_streams, subtitle_streams);
 
+/// @brief Threshold (in percent) above which an item is considered "watched"
+static constexpr int WATCHED_THRESHOLD_PERCENT = 95;
+
 /// @brief Convert a fnOS PlayListItem to a Jellyfin-compatible Episode for existing UI reuse.
 /// Poster URLs are stored with a special marker prefix so video_source.cpp can detect them.
 inline jellyfin::Episode toJellyfinEpisode(const PlayListItem& item) {
@@ -128,7 +131,7 @@ inline jellyfin::Episode toJellyfinEpisode(const PlayListItem& item) {
     ep.UserData.PlaybackPositionTicks = static_cast<int64_t>(item.ts) * 10000LL;
     ep.UserData.IsFavorite = item.is_favorite;
     ep.UserData.Played  = (item.ts > 0 && item.duration > 0 &&
-                           item.ts >= item.duration * 95 / 100);
+                           item.ts >= item.duration * WATCHED_THRESHOLD_PERCENT / 100);
 
     // Map fnOS type to Jellyfin type string
     switch (item.type) {
