@@ -11,6 +11,7 @@
 #include "tab/media_collection.hpp"
 #include "utils/image.hpp"
 #include "utils/dialog.hpp"
+#include "api/jellyfin.hpp"
 #include "api/fnos.hpp"
 
 using namespace brls::literals;  // for _i18n
@@ -86,8 +87,12 @@ public:
             return true;
         });
 
-        // fnOS: no user image endpoint; just skip image loading
-        // Image::with(cell->picture, ...);
+        // Load user avatar image (Jellyfin only; fnOS has no user image endpoint)
+        std::string serverType = AppConfig::instance().getServerType(this->parent->getUrl());
+        if (serverType != "fntv") {
+            std::string url = fmt::format(fmt::runtime(jellyfin::apiUserImage), u.id, "");
+            Image::with(cell->picture, this->parent->getUrl() + url);
+        }
         return cell;
     }
 
@@ -96,21 +101,48 @@ public:
 
         brls::async([this, index]() {
             auto& u = this->list.at(index);
-            // fnOS: verify user by calling user/info with their stored token
-            fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
-            HTTP::Header header = {
-                "Content-Type: application/json",
-                "Cookie: mode=relay",
-                "Authx: " + ax.header,
-                "Authorization: " + u.access_token,
-            };
-            std::string uri = this->parent->getUrl() + fnos::apiUserInfo;
+            std::string serverType = AppConfig::instance().getServerType(this->parent->getUrl());
+
+            if (serverType == "fntv") {
+                // fnOS: verify token via user/info with Authx signing
+                fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+                HTTP::Header header = {
+                    "Content-Type: application/json",
+                    "Cookie: mode=relay",
+                    "Authx: " + ax.header,
+                    "Authorization: " + u.access_token,
+                };
+                try {
+                    std::string resp = HTTP::get(this->parent->getUrl() + fnos::apiUserInfo, header, HTTP::Timeout{});
+                    fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
+                    if (r.code != 0) throw std::runtime_error(r.msg);
+                    if (!r.data.nickname.empty()) u.name = r.data.nickname;
+                    brls::sync([this, u]() {
+                        AppConfig::instance().addUser(u, this->parent->getUrl());
+                        brls::Application::unblockInputs();
+                        brls::Application::clear();
+                        brls::Application::pushActivity(new MainActivity(), brls::TransitionAnimation::NONE);
+                        MediaCollection::clearPref();
+                    });
+                } catch (const std::exception& ex) {
+                    std::string msg = ex.what();
+                    brls::sync([msg]() {
+                        brls::Application::unblockInputs();
+                        Dialog::show(msg);
+                    });
+                }
+                return;
+            }
+
+            // Jellyfin: verify via /Users/{id}
+            HTTP::Header header = {AppConfig::instance().getAuth(u.access_token)};
+            std::string uri = fmt::format("{}/Users/{}", this->parent->getUrl(), u.id);
 
             try {
                 std::string resp = HTTP::get(uri, header, HTTP::Timeout{});
-                fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
-                if (r.code != 0) throw std::runtime_error(r.msg);
-                if (!r.data.nickname.empty()) u.name = r.data.nickname;
+                jellyfin::UserInfo info = nlohmann::json::parse(resp);
+                u.is_admin = info.Policy.IsAdministrator;
+                u.config = std::move(info.Configuration);
                 brls::sync([this, u]() {
                     AppConfig::instance().addUser(u, this->parent->getUrl());
                     brls::Application::unblockInputs();

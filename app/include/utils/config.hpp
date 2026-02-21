@@ -34,8 +34,10 @@ struct AppServer {
     std::string name;
     std::string id;
     std::vector<std::string> urls;
+    /// @brief Server backend type: "jellyfin" (default) or "fntv"
+    std::string type = "jellyfin";
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(AppServer, id, name, urls);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(AppServer, id, name, urls, type);
 
 struct AppRemote {
     std::string name;
@@ -181,6 +183,11 @@ public:
     const std::vector<AppRemote>& getRemotes() const { return this->remotes; }
     const std::vector<AppServer>& getServers() const { return this->servers; }
     const std::vector<AppUser> getUsers(const std::string& id) const;
+
+    /// @brief Returns true if the current server is a fnOS (飞牛影视) server.
+    bool isFnTV() const;
+    /// @brief Returns the type ("jellyfin" or "fntv") of the server whose URL matches @p url.
+    std::string getServerType(const std::string& url) const;
 
     NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(AppConfig, user_id, device, users, servers, setting, remotes);
 

@@ -120,15 +120,22 @@ void SettingTab::onCreate() {
             Dialog::cancelable("main/setting/others/logout"_i18n, []() {
                 brls::async([]() {
                     auto& c = AppConfig::instance();
-                    fnos::AuthxData ax = fnos::genAuthx(fnos::apiLogout);
-                    HTTP::Header header = {
-                        "Content-Type: application/json",
-                        "Cookie: mode=relay",
-                        "Authx: " + ax.header,
-                        "Authorization: " + c.getToken(),
-                    };
                     try {
-                        HTTP::post(c.getUrl() + fnos::apiLogout, "{}", header, HTTP::Timeout{});
+                        if (c.isFnTV()) {
+                            // fnOS logout
+                            fnos::AuthxData ax = fnos::genAuthx(fnos::apiLogout);
+                            HTTP::Header header = {
+                                "Content-Type: application/json",
+                                "Cookie: mode=relay",
+                                "Authx: " + ax.header,
+                                "Authorization: " + c.getToken(),
+                            };
+                            HTTP::post(c.getUrl() + fnos::apiLogout, "{}", header, HTTP::Timeout{});
+                        } else {
+                            // Jellyfin logout
+                            HTTP::Header header = {c.getAuth(c.getToken())};
+                            HTTP::post(c.getUrl() + jellyfin::apiLogout, "", header, HTTP::Timeout{});
+                        }
                         c.removeUser(c.getUserId());
                     } catch (const std::exception& ex) {
                         brls::Logger::warning("Logout failed: {}", ex.what());

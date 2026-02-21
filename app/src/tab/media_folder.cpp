@@ -7,6 +7,7 @@
 #include "tab/live_tv.hpp"
 #include "view/recycling_grid.hpp"
 #include "view/auto_tab_frame.hpp"
+#include "api/jellyfin.hpp"
 #include "api/fnos.hpp"
 #include "utils/image.hpp"
 #include "utils/keybind.hpp"
@@ -39,9 +40,11 @@ public:
     brls::Label* labelTitle = new brls::Label();
 };
 
+// ─── Jellyfin MediaFolderDataSource ──────────────────────────────────────────
+
 class MediaFolderDataSource : public RecyclingGridDataSource {
 public:
-    using MediaList = std::vector<fnos::PlayListItem>;
+    using MediaList = std::vector<jellyfin::Collection>;
 
     MediaFolderDataSource(const MediaList& r) : list(std::move(r)) {
         brls::Logger::debug("MediaFolderDataSource: create {}", r.size());
@@ -52,13 +55,14 @@ public:
     RecyclingGridItem* cellForRow(RecyclingView* recycler, size_t index) override {
         MediaFolderCell* cell = dynamic_cast<MediaFolderCell*>(recycler->dequeueReusableCell("Cell"));
         auto& item = this->list.at(index);
-        if (!item.poster.empty()) {
-            // fnOS: poster is a direct URL path (starts with "/")
-            Image::with(cell->picture, AppConfig::instance().getUrl() + item.poster);
+        auto it = item.ImageTags.find(jellyfin::imageTypePrimary);
+        if (it != item.ImageTags.end()) {
+            Image::load(cell->picture, jellyfin::apiPrimaryImage, item.Id, HTTP::encode_form({{"tag", it->second}}));
             cell->labelTitle->setVisibility(brls::Visibility::GONE);
             cell->picture->setVisibility(brls::Visibility::VISIBLE);
+
         } else {
-            cell->labelTitle->setText(item.title);
+            cell->labelTitle->setText(item.Name);
             cell->labelTitle->setVisibility(brls::Visibility::VISIBLE);
             cell->picture->setVisibility(brls::Visibility::GONE);
         }
@@ -69,15 +73,22 @@ public:
         auto& item = this->list.at(index);
         brls::View* view = nullptr;
 
-        // Navigate based on fnOS item type
-        if (item.type == fnos::ITEM_TYPE_SERIES)
-            view = new MediaCollection(item.guid, jellyfin::mediaTypeSeries);
-        else if (item.type == fnos::ITEM_TYPE_MOVIE)
-            view = new MediaCollection(item.guid, jellyfin::mediaTypeMovie);
-        else if (item.type == fnos::ITEM_TYPE_FOLDER)
-            view = new MediaCollection(item.guid);
+        if (item.CollectionType == "tvshows")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypeSeries);
+        else if (item.CollectionType == "movies")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypeMovie);
+        else if (item.CollectionType == "music")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypeMusicAlbum);
+        else if (item.CollectionType == "books")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypeBook);
+        else if (item.CollectionType == "playlists")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypePlaylist);
+        else if (item.CollectionType == "boxsets")
+            view = new MediaCollection(item.Id, jellyfin::mediaTypeBoxSet);
+        else if (item.CollectionType == "livetv")
+            view = new LiveTV(item.Id);
         else
-            view = new MediaCollection(item.guid);
+            view = new MediaCollection(item.Id);
 
         recycler->present(view);
     }
@@ -89,6 +100,52 @@ public:
 private:
     MediaList list;
 };
+
+// ─── fnOS MediaFolderDataSource ──────────────────────────────────────────────
+
+class FnOSFolderDataSource : public RecyclingGridDataSource {
+public:
+    using MediaList = std::vector<fnos::PlayListItem>;
+
+    FnOSFolderDataSource(const MediaList& r) : list(r) {
+        brls::Logger::debug("FnOSFolderDataSource: create {}", r.size());
+    }
+
+    size_t getItemCount() override { return this->list.size(); }
+
+    RecyclingGridItem* cellForRow(RecyclingView* recycler, size_t index) override {
+        MediaFolderCell* cell = dynamic_cast<MediaFolderCell*>(recycler->dequeueReusableCell("Cell"));
+        auto& item = this->list.at(index);
+
+        if (!item.poster.empty()) {
+            // poster may be an absolute path like "/v/api/..." or a full URL
+            std::string posterUrl = item.poster;
+            if (!posterUrl.empty() && posterUrl.front() == '/')
+                posterUrl = AppConfig::instance().getUrl() + posterUrl;
+            Image::with(cell->picture, posterUrl);
+            cell->labelTitle->setVisibility(brls::Visibility::GONE);
+            cell->picture->setVisibility(brls::Visibility::VISIBLE);
+        } else {
+            cell->labelTitle->setText(item.title.empty() ? item.tv_title : item.title);
+            cell->labelTitle->setVisibility(brls::Visibility::VISIBLE);
+            cell->picture->setVisibility(brls::Visibility::GONE);
+        }
+        return cell;
+    }
+
+    void onItemSelected(brls::Box* recycler, size_t index) override {
+        auto& item = this->list.at(index);
+        // All fnOS items are treated as generic collections for now
+        recycler->present(new MediaCollection(item.guid));
+    }
+
+    void clearData() override { this->list.clear(); }
+
+private:
+    MediaList list;
+};
+
+// ─── MediaFolders ────────────────────────────────────────────────────────────
 
 MediaFolders::MediaFolders() {
     // Inflate the tab from the XML file
@@ -114,15 +171,44 @@ void MediaFolders::onCreate() {
 }
 
 void MediaFolders::doRequest() {
+    if (AppConfig::instance().isFnTV()) {
+        // ── fnOS: load library root via item/list ─────────────────────────────
+        ASYNC_RETAIN
+        fnos::postJSON<std::vector<fnos::PlayListItem>>(
+            {{"parent_guid", ""}, {"sort_column", "title"}, {"sort_type", "asc"}},
+            [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
+                ASYNC_RELEASE
+                if (items.empty())
+                    this->recycler->setEmpty();
+                else
+                    this->recycler->setDataSource(new FnOSFolderDataSource(items));
+            },
+            [ASYNC_TOKEN](const std::string& ex) {
+                ASYNC_RELEASE
+                this->recycler->setError(ex);
+                auto dialog = new brls::Dialog(ex);
+                dialog->addButton("hints/retry"_i18n, [this]() {
+                    brls::sync([this]() {
+                        this->recycler->showSkeleton();
+                        this->doRequest();
+                    });
+                });
+                dialog->addButton("hints/cancel"_i18n, []() {});
+                dialog->open();
+            },
+            fnos::apiItemList);
+        return;
+    }
+
+    // ── Jellyfin: original behavior ───────────────────────────────────────────
     ASYNC_RETAIN
-    fnos::postJSON<std::vector<fnos::PlayListItem>>(
-        {{"parent_guid", ""}, {"sort_column", "title"}, {"sort_type", "asc"}},
-        [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
+    jellyfin::getJSON<jellyfin::Result<jellyfin::Collection>>(
+        [ASYNC_TOKEN](const jellyfin::Result<jellyfin::Collection>& r) {
             ASYNC_RELEASE
-            if (items.empty())
+            if (r.Items.empty())
                 this->recycler->setEmpty();
             else
-                this->recycler->setDataSource(new MediaFolderDataSource(items));
+                this->recycler->setDataSource(new MediaFolderDataSource(r.Items));
         },
         [ASYNC_TOKEN](const std::string& ex) {
             ASYNC_RELEASE
@@ -138,5 +224,5 @@ void MediaFolders::doRequest() {
             dialog->addButton("hints/cancel"_i18n, []() {});
             dialog->open();
         },
-        fnos::apiItemList);
+        jellyfin::apiUserViews, AppConfig::instance().getUserId());
 }

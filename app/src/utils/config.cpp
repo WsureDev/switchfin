@@ -526,11 +526,20 @@ void AppConfig::save() {
 }
 
 bool AppConfig::checkLogin() {
-    // For fnOS, servers use the URL string as their ID (set during server_add).
-    // Servers that still have an empty id field (legacy) can be ignored.
     for (auto& s : this->servers) {
-        if (s.id.empty() && s.urls.size() > 0) {
-            // Migrate: assign URL as ID for any legacy server entry
+        if (s.id.empty() && s.urls.size() > 0 && s.type != "fntv") {
+            try {
+                std::string url = s.urls.front() + jellyfin::apiPublicInfo;
+                std::string resp = HTTP::get(url, HTTP::Timeout{3000});
+                jellyfin::PublicSystemInfo info = nlohmann::json::parse(resp);
+                s.id = info.Id;
+                s.name = info.ServerName;
+            } catch (const std::exception& ex) {
+                brls::Logger::warning("AppConfig {} checkServer: {}", s.urls.front(), ex.what());
+                return false;
+            }
+        } else if (s.id.empty() && s.urls.size() > 0 && s.type == "fntv") {
+            // fnOS servers use their URL as the stable ID
             s.id = s.urls.front();
         }
     }
@@ -545,25 +554,39 @@ bool AppConfig::checkLogin() {
 
     this->server_url = it->urls.front();
 
-    // Verify token by calling fnOS user info endpoint
-    fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
-    HTTP::Header header = {
-        "Content-Type: application/json",
-        "Cookie: mode=relay",
-        "Authx: " + ax.header,
-        "Authorization: " + this->user->access_token,
-    };
-    std::string uri = this->server_url + fnos::apiUserInfo;
-    try {
-        std::string resp = HTTP::get(uri, header, HTTP::Timeout{});
-        fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
-        if (r.code != 0) {
-            brls::Logger::warning("AppConfig checkLogin fnOS: {}", r.msg);
+    if (it->type == "fntv") {
+        // fnOS: verify token by calling user/info with Authx signing
+        fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+        HTTP::Header header = {
+            "Content-Type: application/json",
+            "Cookie: mode=relay",
+            "Authx: " + ax.header,
+            "Authorization: " + this->user->access_token,
+        };
+        try {
+            std::string resp = HTTP::get(this->server_url + fnos::apiUserInfo, header, HTTP::Timeout{});
+            fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
+            if (r.code != 0) {
+                brls::Logger::warning("AppConfig checkLogin fnOS: {}", r.msg);
+                return false;
+            }
+            if (!r.data.nickname.empty()) this->user->name = r.data.nickname;
+            else if (!r.data.username.empty()) this->user->name = r.data.username;
+            return true;
+        } catch (const std::exception& ex) {
+            brls::Logger::warning("AppConfig {} checkLogin fnOS: {}", this->server_url, ex.what());
             return false;
         }
-        // Update display name from server
-        if (!r.data.nickname.empty()) this->user->name = r.data.nickname;
-        else if (!r.data.username.empty()) this->user->name = r.data.username;
+    }
+
+    // Jellyfin: verify via /Users/{id}
+    HTTP::Header header = {this->getAuth(this->user->access_token)};
+    std::string uri = fmt::format("{}/Users/{}", this->server_url, this->user_id);
+    try {
+        std::string resp = HTTP::get(uri, header, HTTP::Timeout{});
+        jellyfin::UserInfo info = nlohmann::json::parse(resp);
+        this->user->is_admin = info.Policy.IsAdministrator;
+        this->user->config = std::move(info.Configuration);
         return true;
     } catch (const std::exception& ex) {
         brls::Logger::warning("AppConfig {} checkLogin: {}", this->server_url, ex.what());
@@ -572,11 +595,33 @@ bool AppConfig::checkLogin() {
 }
 
 bool AppConfig::checkDanmuku() {
-    // fnOS does not have a Danmaku plugin; fall back to locale-based default
-    const std::string locale = brls::Application::getPlatform()->getLocale();
-    bool enable = (locale == brls::LOCALE_ZH_HANS) || (locale == brls::LOCALE_ZH_HANT);
-    DanmakuCore::PLUGIN_ACTIVE = this->getItem(DANMAKU, enable);
-    brls::Logger::info("fnOS: Danmaku plugin not available, fallback ({})", DanmakuCore::PLUGIN_ACTIVE);
+    if (this->isFnTV()) {
+        // fnOS does not have a Danmaku plugin; fall back to locale-based default
+        const std::string locale = brls::Application::getPlatform()->getLocale();
+        bool enable = (locale == brls::LOCALE_ZH_HANS) || (locale == brls::LOCALE_ZH_HANT);
+        DanmakuCore::PLUGIN_ACTIVE = this->getItem(DANMAKU, enable);
+        brls::Logger::info("fnOS: Danmaku plugin not available, fallback ({})", DanmakuCore::PLUGIN_ACTIVE);
+        return false;
+    }
+    jellyfin::getJSON<jellyfin::PluginList>(
+        [](const jellyfin::PluginList& plugins) {
+            for (auto& p : plugins) {
+                if (p.Name == "Danmu") {
+                    DanmakuCore::PLUGIN_ACTIVE = true;
+                    brls::Logger::info("Danmaku plugin found: {}", p.Version);
+                    return;
+                }
+            }
+            DanmakuCore::PLUGIN_ACTIVE = false;
+            brls::Logger::info("Danmaku plugin not found");
+        },
+        [this](const std::string& err) {
+            const std::string locale = brls::Application::getPlatform()->getLocale();
+            bool enable = (locale == brls::LOCALE_ZH_HANS) || (locale == brls::LOCALE_ZH_HANT);
+            DanmakuCore::PLUGIN_ACTIVE = this->getItem(DANMAKU, enable);
+            brls::Logger::warning("checkDanmuku {} fallback ({})", err, DanmakuCore::PLUGIN_ACTIVE);
+        },
+        jellyfin::apiPlugins);
     return false;
 }
 
@@ -720,9 +765,16 @@ bool AppConfig::removeUser(const std::string& id) {
 }
 
 std::string AppConfig::getAuth(const std::string& token) {
-    // fnOS uses a simple bearer token in the Authorization header
-    if (token.empty()) return "Authorization: ";
-    return "Authorization: " + token;
+    if (this->device_name.empty()) this->device_name = AppVersion::getDeviceName();
+
+    if (token.empty())
+        return fmt::format("Authorization: MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            AppVersion::getPackageName(), this->device_name, this->device, AppVersion::getVersion());
+    else
+        return fmt::format(
+            "Authorization: MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\", "
+            "Token=\"{}\"",
+            AppVersion::getPackageName(), this->device_name, this->device, AppVersion::getVersion(), token);
 }
 
 const std::vector<AppUser> AppConfig::getUsers(const std::string& id) const {
@@ -733,6 +785,24 @@ const std::vector<AppUser> AppConfig::getUsers(const std::string& id) const {
         }
     }
     return users;
+}
+
+bool AppConfig::isFnTV() const {
+    if (this->server_url.empty()) return false;
+    for (auto& s : this->servers) {
+        if (!s.urls.empty() && s.urls.front() == this->server_url)
+            return s.type == "fntv";
+    }
+    return false;
+}
+
+std::string AppConfig::getServerType(const std::string& url) const {
+    for (auto& s : this->servers) {
+        for (auto& u : s.urls) {
+            if (u == url) return s.type;
+        }
+    }
+    return "jellyfin";
 }
 
 void AppConfig::addColor(const brls::ThemeVariant tv, const std::string& name, NVGcolor defaultColor) {
