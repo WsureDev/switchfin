@@ -6,7 +6,7 @@
 #include "tab/server_login.hpp"
 #include "utils/config.hpp"
 #include "utils/dialog.hpp"
-#include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 
 using namespace brls::literals;  // for _i18n
 
@@ -40,11 +40,22 @@ bool ServerAdd::onConnect() {
     ASYNC_RETAIN
     brls::async([ASYNC_TOKEN, baseUrl]() {
         try {
-            auto resp = HTTP::get(baseUrl + jellyfin::apiPublicInfo, HTTP::Timeout{3000});
-            jellyfin::PublicSystemInfo info = nlohmann::json::parse(resp);
+            // Use fnOS sys/config to verify that the server is a fnOS NAS
+            fnos::AuthxData ax  = fnos::genAuthx(fnos::apiSysConfig);
+            HTTP::Header hdr    = {
+                "Content-Type: application/json",
+                "Cookie: mode=relay",
+                "Authx: " + ax.header,
+            };
+            auto resp = HTTP::get(baseUrl + fnos::apiSysConfig, hdr, HTTP::Timeout{3000});
+            fnos::Response<fnos::SysConfig> r = nlohmann::json::parse(resp);
+            if (r.code != 0) throw std::runtime_error(r.msg);
+
+            std::string serverName = r.data.hostname.empty() ? baseUrl : r.data.hostname;
+            // Use the base URL as a stable server identifier
             AppServer s = {
-                .name = info.ServerName,
-                .id = info.Id,
+                .name = serverName,
+                .id   = baseUrl,
                 .urls = {baseUrl},
             };
             brls::sync([ASYNC_TOKEN, s]() {

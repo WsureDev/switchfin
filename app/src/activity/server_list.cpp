@@ -11,7 +11,7 @@
 #include "tab/media_collection.hpp"
 #include "utils/image.hpp"
 #include "utils/dialog.hpp"
-#include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 
 using namespace brls::literals;  // for _i18n
 
@@ -86,8 +86,8 @@ public:
             return true;
         });
 
-        std::string url = fmt::format(fmt::runtime(jellyfin::apiUserImage), u.id, "");
-        Image::with(cell->picture, this->parent->getUrl() + url);
+        // fnOS: no user image endpoint; just skip image loading
+        // Image::with(cell->picture, ...);
         return cell;
     }
 
@@ -96,14 +96,21 @@ public:
 
         brls::async([this, index]() {
             auto& u = this->list.at(index);
-            HTTP::Header header = {AppConfig::instance().getAuth(u.access_token)};
-            std::string uri = fmt::format("{}/Users/{}", this->parent->getUrl(), u.id);
+            // fnOS: verify user by calling user/info with their stored token
+            fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+            HTTP::Header header = {
+                "Content-Type: application/json",
+                "Cookie: mode=relay",
+                "Authx: " + ax.header,
+                "Authorization: " + u.access_token,
+            };
+            std::string uri = this->parent->getUrl() + fnos::apiUserInfo;
 
             try {
                 std::string resp = HTTP::get(uri, header, HTTP::Timeout{});
-                jellyfin::UserInfo info = nlohmann::json::parse(resp);
-                u.is_admin = info.Policy.IsAdministrator;
-                u.config = std::move(info.Configuration);
+                fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
+                if (r.code != 0) throw std::runtime_error(r.msg);
+                if (!r.data.nickname.empty()) u.name = r.data.nickname;
                 brls::sync([this, u]() {
                     AppConfig::instance().addUser(u, this->parent->getUrl());
                     brls::Application::unblockInputs();

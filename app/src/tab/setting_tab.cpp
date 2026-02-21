@@ -25,6 +25,7 @@
 #include "view/selector_cell.hpp"
 #include "api/analytics.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/dialog.hpp"
 #ifdef __SWITCH__
 #include "utils/overclock.hpp"
@@ -119,9 +120,15 @@ void SettingTab::onCreate() {
             Dialog::cancelable("main/setting/others/logout"_i18n, []() {
                 brls::async([]() {
                     auto& c = AppConfig::instance();
-                    HTTP::Header header = {c.getAuth(c.getToken())};
+                    fnos::AuthxData ax = fnos::genAuthx(fnos::apiLogout);
+                    HTTP::Header header = {
+                        "Content-Type: application/json",
+                        "Cookie: mode=relay",
+                        "Authx: " + ax.header,
+                        "Authorization: " + c.getToken(),
+                    };
                     try {
-                        HTTP::post(c.getUrl() + jellyfin::apiLogout, "", header, HTTP::Timeout{});
+                        HTTP::post(c.getUrl() + fnos::apiLogout, "{}", header, HTTP::Timeout{});
                         c.removeUser(c.getUserId());
                     } catch (const std::exception& ex) {
                         brls::Logger::warning("Logout failed: {}", ex.what());

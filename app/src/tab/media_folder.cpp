@@ -7,7 +7,7 @@
 #include "tab/live_tv.hpp"
 #include "view/recycling_grid.hpp"
 #include "view/auto_tab_frame.hpp"
-#include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/image.hpp"
 #include "utils/keybind.hpp"
 
@@ -41,7 +41,7 @@ public:
 
 class MediaFolderDataSource : public RecyclingGridDataSource {
 public:
-    using MediaList = std::vector<jellyfin::Collection>;
+    using MediaList = std::vector<fnos::PlayListItem>;
 
     MediaFolderDataSource(const MediaList& r) : list(std::move(r)) {
         brls::Logger::debug("MediaFolderDataSource: create {}", r.size());
@@ -52,14 +52,13 @@ public:
     RecyclingGridItem* cellForRow(RecyclingView* recycler, size_t index) override {
         MediaFolderCell* cell = dynamic_cast<MediaFolderCell*>(recycler->dequeueReusableCell("Cell"));
         auto& item = this->list.at(index);
-        auto it = item.ImageTags.find(jellyfin::imageTypePrimary);
-        if (it != item.ImageTags.end()) {
-            Image::load(cell->picture, jellyfin::apiPrimaryImage, item.Id, HTTP::encode_form({{"tag", it->second}}));
+        if (!item.poster.empty()) {
+            // fnOS: poster is a direct URL path (starts with "/")
+            Image::with(cell->picture, AppConfig::instance().getUrl() + item.poster);
             cell->labelTitle->setVisibility(brls::Visibility::GONE);
             cell->picture->setVisibility(brls::Visibility::VISIBLE);
-
         } else {
-            cell->labelTitle->setText(item.Name);
+            cell->labelTitle->setText(item.title);
             cell->labelTitle->setVisibility(brls::Visibility::VISIBLE);
             cell->picture->setVisibility(brls::Visibility::GONE);
         }
@@ -70,22 +69,15 @@ public:
         auto& item = this->list.at(index);
         brls::View* view = nullptr;
 
-        if (item.CollectionType == "tvshows")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypeSeries);
-        else if (item.CollectionType == "movies")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypeMovie);
-        else if (item.CollectionType == "music")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypeMusicAlbum);
-        else if (item.CollectionType == "books")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypeBook);
-        else if (item.CollectionType == "playlists")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypePlaylist);
-        else if (item.CollectionType == "boxsets")
-            view = new MediaCollection(item.Id, jellyfin::mediaTypeBoxSet);
-        else if (item.CollectionType == "livetv")
-            view = new LiveTV(item.Id);
+        // Navigate based on fnOS item type
+        if (item.type == fnos::ITEM_TYPE_SERIES)
+            view = new MediaCollection(item.guid, jellyfin::mediaTypeSeries);
+        else if (item.type == fnos::ITEM_TYPE_MOVIE)
+            view = new MediaCollection(item.guid, jellyfin::mediaTypeMovie);
+        else if (item.type == fnos::ITEM_TYPE_FOLDER)
+            view = new MediaCollection(item.guid);
         else
-            view = new MediaCollection(item.Id);
+            view = new MediaCollection(item.guid);
 
         recycler->present(view);
     }
@@ -123,13 +115,14 @@ void MediaFolders::onCreate() {
 
 void MediaFolders::doRequest() {
     ASYNC_RETAIN
-    jellyfin::getJSON<jellyfin::Result<jellyfin::Collection>>(
-        [ASYNC_TOKEN](const jellyfin::Result<jellyfin::Collection>& r) {
+    fnos::postJSON<std::vector<fnos::PlayListItem>>(
+        {{"parent_guid", ""}, {"sort_column", "title"}, {"sort_type", "asc"}},
+        [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
             ASYNC_RELEASE
-            if (r.Items.empty())
+            if (items.empty())
                 this->recycler->setEmpty();
             else
-                this->recycler->setDataSource(new MediaFolderDataSource(r.Items));
+                this->recycler->setDataSource(new MediaFolderDataSource(items));
         },
         [ASYNC_TOKEN](const std::string& ex) {
             ASYNC_RELEASE
@@ -145,5 +138,5 @@ void MediaFolders::doRequest() {
             dialog->addButton("hints/cancel"_i18n, []() {});
             dialog->open();
         },
-        jellyfin::apiUserViews, AppConfig::instance().getUserId());
+        fnos::apiItemList);
 }

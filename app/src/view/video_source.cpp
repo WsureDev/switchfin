@@ -6,6 +6,7 @@
 #include "tab/music_album.hpp"
 #include "tab/song_list.hpp"
 #include "tab/playlist.hpp"
+#include "utils/image.hpp"
 #include "utils/misc.hpp"
 #include "view/svg_image.hpp"
 #include "view/video_card.hpp"
@@ -25,6 +26,18 @@ RecyclingGridItem* VideoDataSource::cellForRow(RecyclingView* recycler, size_t i
     VideoCardCell* cell = dynamic_cast<VideoCardCell*>(recycler->dequeueReusableCell("Cell"));
     auto& item = this->list.at(index);
     cell->setId(item.Id);
+
+    // Helper: load image — if the tag value starts with '/' it is a fnOS direct URL path;
+    // otherwise use the standard Jellyfin template URL.
+    auto loadImage = [&](const std::string& fmt_str, const std::string& id, const std::string& tag) {
+        if (!tag.empty() && tag[0] == '/') {
+            Image::with(cell->picture, AppConfig::instance().getUrl() + tag);
+        } else {
+            Image::load(cell->picture, fmt::runtime(fmt_str), id,
+                HTTP::encode_form({{"tag", tag}, {"maxWidth", "325"}}));
+        }
+    };
+
     if (item.Type == jellyfin::mediaTypeEpisode) {
         if (item.SeriesName.empty()) {
             cell->labelTitle->setVisibility(brls::Visibility::GONE);
@@ -35,8 +48,7 @@ RecyclingGridItem* VideoDataSource::cellForRow(RecyclingView* recycler, size_t i
 
         auto it = item.ImageTags.find(jellyfin::imageTypeThumb);
         if (it != item.ImageTags.end()) {
-            Image::load(cell->picture, jellyfin::apiThumbImage, item.Id,
-                HTTP::encode_form({{"tag", it->second}, {"maxWidth", "325"}}));
+            loadImage(std::string(jellyfin::apiThumbImage), item.Id, it->second);
         } else if (item.ParentThumbImageTag.size() > 0) {
             Image::load(cell->picture, jellyfin::apiThumbImage, item.ParentThumbItemId,
                 HTTP::encode_form({{"tag", item.ParentThumbImageTag}, {"maxWidth", "325"}}));
@@ -46,6 +58,11 @@ RecyclingGridItem* VideoDataSource::cellForRow(RecyclingView* recycler, size_t i
         } else if (item.SeriesId.is_string()) {
             Image::load(cell->picture, jellyfin::apiPrimaryImage, item.SeriesId.get<std::string>(),
                 HTTP::encode_form({{"tag", item.SeriesPrimaryImageTag}, {"maxWidth", "325"}}));
+        } else {
+            // fnOS episode: poster may be stored in Primary tag
+            auto pit = item.ImageTags.find(jellyfin::imageTypePrimary);
+            if (pit != item.ImageTags.end())
+                loadImage(std::string(jellyfin::apiPrimaryImage), item.Id, pit->second);
         }
     } else {
         cell->labelTitle->setText(item.Name);
@@ -60,8 +77,7 @@ RecyclingGridItem* VideoDataSource::cellForRow(RecyclingView* recycler, size_t i
 
         auto it = item.ImageTags.find(jellyfin::imageTypePrimary);
         if (it != item.ImageTags.end()) {
-            Image::load(cell->picture, jellyfin::apiPrimaryImage, item.Id,
-                HTTP::encode_form({{"tag", it->second}, {"maxWidth", "325"}}));
+            loadImage(std::string(jellyfin::apiPrimaryImage), item.Id, it->second);
         }
     }
 
