@@ -212,6 +212,8 @@ bool ServerLogin::onSignin() {
                         .name         = displayName,
                         .access_token = r.token,
                         .server_id    = loginUrl,
+                        .fntv_username = username,   // saved for token auto-refresh
+                        .fntv_password = password,   // saved for token auto-refresh
                     };
 
                     brls::sync([ASYNC_TOKEN, u, loginUrl]() {

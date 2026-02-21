@@ -556,27 +556,39 @@ bool AppConfig::checkLogin() {
 
     if (it->type == "fntv") {
         // fnOS: verify token by calling user/info with Authx signing
-        fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
-        HTTP::Header header = {
-            "Content-Type: application/json",
-            "Cookie: mode=relay",
-            "Authx: " + ax.header,
-            "Authorization: " + this->user->access_token,
-        };
-        try {
-            std::string resp = HTTP::get(this->server_url + fnos::apiUserInfo, header, HTTP::Timeout{});
-            fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
-            if (r.code != 0) {
-                brls::Logger::warning("AppConfig checkLogin fnOS: {}", r.msg);
+        auto doVerify = [this]() -> bool {
+            fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+            HTTP::Header header = {
+                "Content-Type: application/json",
+                "Cookie: mode=relay",
+                "Authx: " + ax.header,
+                "Authorization: " + this->user->access_token,
+            };
+            try {
+                std::string resp = HTTP::get(this->server_url + fnos::apiUserInfo, header, HTTP::Timeout{});
+                brls::Logger::debug("fnOS checkLogin user/info -> {} bytes", resp.size());
+                fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
+                if (r.code != 0) {
+                    brls::Logger::warning("fnOS checkLogin user/info: code={} msg={}", r.code, r.msg);
+                    return false;
+                }
+                if (!r.data.nickname.empty()) this->user->name = r.data.nickname;
+                else if (!r.data.username.empty()) this->user->name = r.data.username;
+                return true;
+            } catch (const std::exception& ex) {
+                brls::Logger::warning("AppConfig {} checkLogin fnOS: {}", this->server_url, ex.what());
                 return false;
             }
-            if (!r.data.nickname.empty()) this->user->name = r.data.nickname;
-            else if (!r.data.username.empty()) this->user->name = r.data.username;
-            return true;
-        } catch (const std::exception& ex) {
-            brls::Logger::warning("AppConfig {} checkLogin fnOS: {}", this->server_url, ex.what());
-            return false;
-        }
+        };
+
+        if (doVerify()) return true;
+
+        // Token may have expired — try to refresh with stored credentials
+        brls::Logger::info("fnOS: token verification failed, attempting refresh");
+        if (this->refreshFnTVToken() && doVerify()) return true;
+
+        brls::Logger::warning("fnOS: login check failed (no valid token)");
+        return false;
     }
 
     // Jellyfin: verify via /Users/{id}
@@ -803,6 +815,47 @@ std::string AppConfig::getServerType(const std::string& url) const {
         }
     }
     return "jellyfin";
+}
+
+bool AppConfig::refreshFnTVToken() {
+    if (this->user == this->users.end()) return false;
+    if (this->user->fntv_password.empty() || this->user->fntv_username.empty()) {
+        brls::Logger::warning("fnOS refreshToken: no stored credentials for user '{}'", this->user->name);
+        return false;
+    }
+
+    brls::Logger::info("fnOS refreshToken: re-logging in as '{}'", this->user->fntv_username);
+
+    nlohmann::json data = {
+        {"app_name", "trimemedia-web"},
+        {"username", this->user->fntv_username},
+        {"password", this->user->fntv_password},
+    };
+    std::string rawJson  = data.dump();
+    fnos::AuthxData ax   = fnos::genAuthx(fnos::apiLogin, rawJson);
+    nlohmann::json body  = data;
+    body["nonce"]        = ax.nonce;
+    HTTP::Header hdr = {
+        "Content-Type: application/json",
+        "Cookie: mode=relay",
+        "Authx: " + ax.header,
+    };
+    try {
+        std::string resp = HTTP::post(this->server_url + fnos::apiLogin, body.dump(), hdr, HTTP::Timeout{5000});
+        brls::Logger::debug("fnOS refreshToken response: {} bytes", resp.size());
+        fnos::Response<fnos::LoginResult> r = nlohmann::json::parse(resp);
+        if (r.code != 0 || r.data.token.empty()) {
+            brls::Logger::warning("fnOS refreshToken failed: code={} msg={}", r.code, r.msg);
+            return false;
+        }
+        this->user->access_token = r.data.token;
+        this->save();
+        brls::Logger::info("fnOS refreshToken: new token obtained");
+        return true;
+    } catch (const std::exception& ex) {
+        brls::Logger::warning("fnOS refreshToken exception: {}", ex.what());
+        return false;
+    }
 }
 
 void AppConfig::addColor(const brls::ThemeVariant tv, const std::string& name, NVGcolor defaultColor) {

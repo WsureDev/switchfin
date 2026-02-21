@@ -175,14 +175,14 @@ void MediaFolders::doRequest() {
     if (AppConfig::instance().isFnTV()) {
         // ── fnOS: load library root via item/list ─────────────────────────────
         ASYNC_RETAIN
-        fnos::postJSON<std::vector<fnos::PlayListItem>>(
+        fnos::postJSON<fnos::ItemListData>(
             {{"parent_guid", ""}, {"sort_column", "title"}, {"sort_type", "asc"}},
-            [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
+            [ASYNC_TOKEN](const fnos::ItemListData& result) {
                 ASYNC_RELEASE
-                if (items.empty())
+                if (result.list.empty())
                     this->recycler->setEmpty();
                 else
-                    this->recycler->setDataSource(new FnOSFolderDataSource(items));
+                    this->recycler->setDataSource(new FnOSFolderDataSource(result.list));
             },
             [ASYNC_TOKEN](const std::string& ex) {
                 ASYNC_RELEASE

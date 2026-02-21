@@ -212,7 +212,9 @@ void PlayerView::playMedia(const uint64_t seekTicks) {
             [ASYNC_TOKEN, seekTicks](const fnos::PlayInfo& info) {
                 ASYNC_RELEASE
 
-                if (info.guid.empty()) {
+                // media_guid is required for the streaming URL; guid is the item guid
+                if (info.media_guid.empty()) {
+                    brls::Logger::error("fnOS: play/info returned empty media_guid for item {}", info.guid);
                     Dialog::show("fnOS: empty media_guid", []() { VideoView::close(); });
                     return;
                 }
@@ -220,14 +222,16 @@ void PlayerView::playMedia(const uint64_t seekTicks) {
                 auto& mpv = MPVCore::instance();
                 auto& svr = AppConfig::instance().getUrl();
 
-                std::string mediaPath = fmt::format(fmt::runtime(fnos::apiMediaRange), info.guid);
+                std::string mediaPath = fmt::format(fmt::runtime(fnos::apiMediaRange), info.media_guid);
                 std::string mediaUrl  = svr + mediaPath;
 
                 std::stringstream ssextra;
                 ssextra << fmt::format("network-timeout={}", HTTP::TIMEOUT / 100);
 
-                uint64_t resumeTicks = seekTicks > 0 ? seekTicks
-                                                      : static_cast<uint64_t>(info.ts) * 10000LL;
+                // info.ts is in **seconds**; convert to ticks for consistency with Jellyfin seek
+                uint64_t resumeTicks = seekTicks > 0
+                                       ? seekTicks
+                                       : static_cast<uint64_t>(info.ts * jellyfin::PLAYTICKS);
                 if (resumeTicks > 0)
                     ssextra << ",start=" << misc::sec2Time(resumeTicks / jellyfin::PLAYTICKS);
 
@@ -241,12 +245,12 @@ void PlayerView::playMedia(const uint64_t seekTicks) {
                 }
 
                 this->playMethod    = jellyfin::methodDirectPlay;
-                this->playSessionId = info.guid;
-                this->stream.Id     = info.guid;
+                this->playSessionId = info.media_guid;
+                this->stream.Id     = info.media_guid;
                 this->stream.Name   = info.item.title;
                 this->stream.Bitrate = 0;
 
-                brls::Logger::info("fnOS play: {}", mediaUrl);
+                brls::Logger::info("fnOS play: {} (media_guid={})", mediaUrl, info.media_guid);
                 mpv.setUrl(mediaUrl, ssextra.str());
                 view->getProfile()->init(this->playMethod);
             },

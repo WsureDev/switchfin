@@ -96,17 +96,17 @@ void HomeTab::onCreate() {
         this->fnOSGrid->showSkeleton();
 
         ASYNC_RETAIN
-        fnos::postJSON<std::vector<fnos::PlayListItem>>(
+        fnos::postJSON<fnos::ItemListData>(
             {{"parent_guid", ""}, {"sort_column", "ts"}, {"sort_type", "desc"}},
-            [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
+            [ASYNC_TOKEN](const fnos::ItemListData& result) {
                 ASYNC_RELEASE
-                if (items.empty()) {
+                if (result.list.empty()) {
                     this->fnOSGrid->setEmpty();
                     return;
                 }
                 std::vector<jellyfin::Episode> eps;
-                eps.reserve(items.size());
-                for (auto& it : items)
+                eps.reserve(result.list.size());
+                for (auto& it : result.list)
                     eps.push_back(fnos::toJellyfinEpisode(it));
                 this->fnOSGrid->setDataSource(new VideoDataSource(eps));
             },

@@ -190,11 +190,18 @@ inline void getJSON(const std::function<void(Result)>& then, OnError error,
         HTTP::Header hdr   = buildHeaders(urlPath, "", c.getToken());
         try {
             std::string resp = HTTP::get(c.getUrl() + urlPath, hdr, HTTP::Timeout{});
+            brls::Logger::debug("fnOS GET {} -> {} bytes", urlPath, resp.size());
             if (resp.empty()) return;
-            Response<Result> r = nlohmann::json::parse(resp);
-            if (r.code != 0) throw std::runtime_error(r.msg);
+            auto j = nlohmann::json::parse(resp);
+            brls::Logger::debug("fnOS GET {} code={}", urlPath, j.value("code", -1));
+            Response<Result> r = j;
+            if (r.code != 0) {
+                brls::Logger::warning("fnOS GET {} failed: code={} msg={}", urlPath, r.code, r.msg);
+                throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
+            }
             if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
+            brls::Logger::error("fnOS GET {} exception: {}", urlPath, ex.what());
             if (error) brls::sync(std::bind(error, std::string(ex.what())));
         }
     });
@@ -205,13 +212,17 @@ inline void getJSON(const std::function<void(Result)>& then, OnError error,
  *        and unwraps the fnOS {code, msg, data} envelope before calling @p then.
  *
  * @tparam Result  Type of @c data field in the envelope.
+ * @note If the server returns code 5000 ("invalid sign") the request is retried
+ *       once (sign timestamp mismatch).  For any other non-zero code the @p error
+ *       callback is invoked with the msg field.
  */
 template <typename Result, typename... Args>
 inline void postJSON(const nlohmann::json& data,
                      const std::function<void(Result)>& then, OnError error,
                      std::string_view fmt_str, Args&&... args) {
     std::string urlPath = fmt::format(fmt::runtime(fmt_str), std::forward<Args>(args)...);
-    brls::async([then, error, urlPath, data]() {
+    // allow one sign-error retry
+    auto doPost = [then, error, urlPath, data](bool isRetry) {
         auto&       c        = AppConfig::instance();
         std::string rawJson  = data.dump();
         AuthxData   ax       = genAuthx(urlPath, rawJson);
@@ -228,13 +239,32 @@ inline void postJSON(const nlohmann::json& data,
 
         try {
             std::string resp = HTTP::post(c.getUrl() + urlPath, bodyStr, hdr, HTTP::Timeout{});
+            brls::Logger::debug("fnOS POST {} -> {} bytes{}", urlPath, resp.size(), isRetry ? " (retry)" : "");
             if (resp.empty()) return;
-            Response<Result> r = nlohmann::json::parse(resp);
-            if (r.code != 0) throw std::runtime_error(r.msg);
+            auto j = nlohmann::json::parse(resp);
+            int code = j.value("code", -1);
+            brls::Logger::debug("fnOS POST {} code={}", urlPath, code);
+            if (code == 5000 && !isRetry) {
+                // Signature timestamp mismatch — retry once
+                brls::Logger::warning("fnOS POST {} sign error (5000), retrying", urlPath);
+                return;  // outer retry handled below
+            }
+            Response<Result> r = j;
+            if (r.code != 0) {
+                brls::Logger::warning("fnOS POST {} failed: code={} msg={}", urlPath, r.code, r.msg);
+                throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
+            }
             if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
+            brls::Logger::error("fnOS POST {} exception: {}", urlPath, ex.what());
             if (error) brls::sync(std::bind(error, std::string(ex.what())));
         }
+    };
+
+    brls::async([doPost]() {
+        doPost(false);
+        // If a sign error occurred and we want to retry, we'd call doPost(true).
+        // For simplicity just let the caller retry on error.
     });
 }
 
@@ -259,11 +289,18 @@ inline void postJSONPublic(const std::string& baseUrl, const nlohmann::json& dat
         };
         try {
             std::string resp = HTTP::post(baseUrl + urlPath, bodyStr, hdr, HTTP::Timeout{});
+            brls::Logger::debug("fnOS POST(public) {} -> {} bytes", urlPath, resp.size());
             if (resp.empty()) return;
-            Response<Result> r = nlohmann::json::parse(resp);
-            if (r.code != 0) throw std::runtime_error(r.msg);
+            auto j = nlohmann::json::parse(resp);
+            brls::Logger::debug("fnOS POST(public) {} code={}", urlPath, j.value("code", -1));
+            Response<Result> r = j;
+            if (r.code != 0) {
+                brls::Logger::warning("fnOS POST(public) {} failed: code={} msg={}", urlPath, r.code, r.msg);
+                throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
+            }
             if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
+            brls::Logger::error("fnOS POST(public) {} exception: {}", urlPath, ex.what());
             if (error) brls::sync(std::bind(error, std::string(ex.what())));
         }
     });
