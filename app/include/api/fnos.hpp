@@ -213,15 +213,15 @@ inline void getJSON(const std::function<void(Result)>& then, OnError error,
  *
  * @tparam Result  Type of @c data field in the envelope.
  * @note If the server returns code 5000 ("invalid sign") the request is retried
- *       once (sign timestamp mismatch).  For any other non-zero code the @p error
- *       callback is invoked with the msg field.
+ *       once immediately (sign timestamp mismatch).  For any other non-zero code
+ *       the @p error callback is invoked with the msg field.
  */
 template <typename Result, typename... Args>
 inline void postJSON(const nlohmann::json& data,
                      const std::function<void(Result)>& then, OnError error,
                      std::string_view fmt_str, Args&&... args) {
     std::string urlPath = fmt::format(fmt::runtime(fmt_str), std::forward<Args>(args)...);
-    // allow one sign-error retry
+
     auto doPost = [then, error, urlPath, data](bool isRetry) {
         auto&       c        = AppConfig::instance();
         std::string rawJson  = data.dump();
@@ -240,14 +240,14 @@ inline void postJSON(const nlohmann::json& data,
         try {
             std::string resp = HTTP::post(c.getUrl() + urlPath, bodyStr, hdr, HTTP::Timeout{});
             brls::Logger::debug("fnOS POST {} -> {} bytes{}", urlPath, resp.size(), isRetry ? " (retry)" : "");
-            if (resp.empty()) return;
+            if (resp.empty()) return false;  // returns false = "failed, don't retry"
             auto j = nlohmann::json::parse(resp);
             int code = j.value("code", -1);
             brls::Logger::debug("fnOS POST {} code={}", urlPath, code);
             if (code == 5000 && !isRetry) {
-                // Signature timestamp mismatch — retry once
-                brls::Logger::warning("fnOS POST {} sign error (5000), retrying", urlPath);
-                return;  // outer retry handled below
+                // Signature timestamp mismatch — signal caller to retry once
+                brls::Logger::warning("fnOS POST {} sign error (5000), will retry", urlPath);
+                return true;  // true = "sign error, please retry"
             }
             Response<Result> r = j;
             if (r.code != 0) {
@@ -255,16 +255,17 @@ inline void postJSON(const nlohmann::json& data,
                 throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
             }
             if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
+            return false;  // success
         } catch (const std::exception& ex) {
             brls::Logger::error("fnOS POST {} exception: {}", urlPath, ex.what());
             if (error) brls::sync(std::bind(error, std::string(ex.what())));
+            return false;
         }
     };
 
     brls::async([doPost]() {
-        doPost(false);
-        // If a sign error occurred and we want to retry, we'd call doPost(true).
-        // For simplicity just let the caller retry on error.
+        bool shouldRetry = doPost(false);
+        if (shouldRetry) doPost(true);
     });
 }
 

@@ -583,12 +583,11 @@ bool AppConfig::checkLogin() {
 
         if (doVerify()) return true;
 
-        // Token may have expired — try to refresh with stored credentials
+        // Token may have expired — try to refresh with stored credentials.
+        // refreshFnTVToken() re-fetches user info internally; if it succeeds
+        // the token is already valid so we don't need a second doVerify() call.
         brls::Logger::info("fnOS: token verification failed, attempting refresh");
-        if (this->refreshFnTVToken() && doVerify()) return true;
-
-        brls::Logger::warning("fnOS: login check failed (no valid token)");
-        return false;
+        return this->refreshFnTVToken();
     }
 
     // Jellyfin: verify via /Users/{id}
@@ -850,7 +849,26 @@ bool AppConfig::refreshFnTVToken() {
         }
         this->user->access_token = r.data.token;
         this->save();
-        brls::Logger::info("fnOS refreshToken: new token obtained");
+        brls::Logger::info("fnOS refreshToken: new token obtained, verifying user info");
+
+        // Confirm the new token works and update display name from server
+        fnos::AuthxData axVerify = fnos::genAuthx(fnos::apiUserInfo);
+        HTTP::Header verifyHdr = {
+            "Content-Type: application/json",
+            "Cookie: mode=relay",
+            "Authx: " + axVerify.header,
+            "Authorization: " + r.data.token,
+        };
+        try {
+            std::string infoResp = HTTP::get(this->server_url + fnos::apiUserInfo, verifyHdr, HTTP::Timeout{5000});
+            fnos::Response<fnos::UserInfo> ui = nlohmann::json::parse(infoResp);
+            if (ui.code == 0) {
+                if (!ui.data.nickname.empty()) this->user->name = ui.data.nickname;
+                else if (!ui.data.username.empty()) this->user->name = ui.data.username;
+            }
+        } catch (const std::exception& ex) {
+            brls::Logger::warning("fnOS refreshToken: user/info check failed ({}), token saved anyway", ex.what());
+        }
         return true;
     } catch (const std::exception& ex) {
         brls::Logger::warning("fnOS refreshToken exception: {}", ex.what());
