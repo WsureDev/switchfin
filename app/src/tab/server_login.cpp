@@ -5,10 +5,13 @@
 #include "tab/server_login.hpp"
 #include "activity/main_activity.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "api/analytics.hpp"
 #include "utils/dialog.hpp"
 
 using namespace brls::literals;  // for _i18n
+
+// ─── Jellyfin QuickConnect (unchanged from original) ──────────────────────────
 
 class QuickConnect : public brls::Box {
 public:
@@ -88,6 +91,8 @@ private:
     std::string url;
 };
 
+// ─── ServerLogin ─────────────────────────────────────────────────────────────
+
 ServerLogin::ServerLogin(const std::string& name, const std::string& url, const std::string& user) : url(url) {
     // Inflate the tab from the XML file
     this->inflateFromXMLRes("xml/tabs/server_login.xml");
@@ -95,31 +100,38 @@ ServerLogin::ServerLogin(const std::string& name, const std::string& url, const 
 
     this->hdrSigin->setTitle(brls::getStr("main/setting/server/sigin_to", name));
     this->inputUser->init("main/setting/username"_i18n, user);
-    this->inputPass->init("main/setting/password"_i18n, "", [](std::string text) {}, "", "", 256);
+    this->inputPass->init("main/setting/password"_i18n, "", []([[maybe_unused]] std::string text) {}, "", "", 256);
 
     this->btnSignin->registerClickAction([this](...) { return this->onSignin(); });
     this->btnQuickConnect->setVisibility(brls::Visibility::GONE);
 
-    ASYNC_RETAIN
-    brls::async([ASYNC_TOKEN]() {
-        try {
-            std::string resp = HTTP::get(this->url + jellyfin::apiQuickEnabled, HTTP::Timeout{});
-            if (resp.compare("true") == 0)
-                brls::sync([ASYNC_TOKEN]() {
-                    ASYNC_RELEASE
-                    this->btnQuickConnect->setVisibility(brls::Visibility::VISIBLE);
-                    this->btnQuickConnect->registerClickAction([this](...) {
-                        this->doQuickLogin();
-                        return true;
+    std::string serverType = AppConfig::instance().getServerType(this->url);
+    if (serverType == "fntv") {
+        // fnOS: QuickConnect not supported, no disclaimer
+        this->labelDisclaimer->setVisibility(brls::Visibility::INVISIBLE);
+    } else {
+        // Jellyfin: check QuickConnect availability and show disclaimer
+        ASYNC_RETAIN
+        brls::async([ASYNC_TOKEN]() {
+            try {
+                std::string resp = HTTP::get(this->url + jellyfin::apiQuickEnabled, HTTP::Timeout{});
+                if (resp.compare("true") == 0)
+                    brls::sync([ASYNC_TOKEN]() {
+                        ASYNC_RELEASE
+                        this->btnQuickConnect->setVisibility(brls::Visibility::VISIBLE);
+                        this->btnQuickConnect->registerClickAction([this](...) {
+                            this->doQuickLogin();
+                            return true;
+                        });
                     });
-                });
-        } catch (const std::exception& ex) {
-            ASYNC_RELEASE
-            brls::Logger::warning("query quickconnect: {}", ex.what());
-        }
-    });
+            } catch (const std::exception& ex) {
+                ASYNC_RELEASE
+                brls::Logger::warning("query quickconnect: {}", ex.what());
+            }
+        });
 
-    this->Disclaimer();
+        this->Disclaimer();
+    }
 }
 
 ServerLogin::~ServerLogin() { brls::Logger::debug("ServerLogin Activity: delete"); }
@@ -155,6 +167,85 @@ bool ServerLogin::onSignin() {
 
     brls::Application::blockInputs();
     this->btnSignin->setState(brls::ButtonState::DISABLED);
+
+    std::string serverType = AppConfig::instance().getServerType(this->url);
+
+    if (serverType == "fntv") {
+        // ── fnOS login ────────────────────────────────────────────────────────
+        nlohmann::json data = {
+            {"app_name", "trimemedia-web"},
+            {"username", username},
+            {"password", password},
+        };
+
+        std::string loginUrl = this->url;
+        ASYNC_RETAIN
+        fnos::postJSONPublic<fnos::LoginResult>(
+            loginUrl, data,
+            [ASYNC_TOKEN, loginUrl, username, password](const fnos::LoginResult& r) {
+                ASYNC_RELEASE
+                if (r.token.empty()) {
+                    this->btnSignin->setState(brls::ButtonState::ENABLED);
+                    brls::Application::unblockInputs();
+                    Dialog::show("Login failed: empty token");
+                    return;
+                }
+
+                // Fetch user info to get uid and display name
+                fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+                HTTP::Header hdr = {
+                    "Content-Type: application/json",
+                    "Cookie: mode=relay",
+                    "Authx: " + ax.header,
+                    "Authorization: " + r.token,
+                };
+                try {
+                    auto resp = HTTP::get(loginUrl + fnos::apiUserInfo, hdr, HTTP::Timeout{});
+                    fnos::Response<fnos::UserInfo> userResp = nlohmann::json::parse(resp);
+                    if (userResp.code != 0) throw std::runtime_error(userResp.msg);
+
+                    const fnos::UserInfo& info = userResp.data;
+                    std::string displayName = info.nickname.empty() ? info.username : info.nickname;
+
+                    AppUser u = {
+                        .id           = std::to_string(info.uid),
+                        .name         = displayName,
+                        .access_token = r.token,
+                        .server_id    = loginUrl,
+                        .fntv_username = username,   // saved for token auto-refresh
+                        .fntv_password = password,   // saved for token auto-refresh
+                    };
+
+                    brls::sync([ASYNC_TOKEN, u, loginUrl]() {
+                        ASYNC_RELEASE
+                        AppConfig::instance().addUser(u, loginUrl);
+                        this->btnSignin->setState(brls::ButtonState::ENABLED);
+                        brls::Application::unblockInputs();
+                        brls::Application::clear();
+                        brls::Application::pushActivity(new MainActivity(), brls::TransitionAnimation::NONE);
+                        GA("login", {{"method", {loginUrl}}});
+                    });
+                } catch (const std::exception& ex) {
+                    std::string msg = ex.what();
+                    brls::sync([ASYNC_TOKEN, msg]() {
+                        ASYNC_RELEASE
+                        this->btnSignin->setState(brls::ButtonState::ENABLED);
+                        brls::Application::unblockInputs();
+                        Dialog::show(msg);
+                    });
+                }
+            },
+            [ASYNC_TOKEN](const std::string& msg) {
+                ASYNC_RELEASE
+                this->btnSignin->setState(brls::ButtonState::ENABLED);
+                brls::Application::unblockInputs();
+                Dialog::show(msg);
+            },
+            fnos::apiLogin);
+        return true;
+    }
+
+    // ── Jellyfin login ────────────────────────────────────────────────────────
     nlohmann::json data = {{"Username", username}, {"Pw", password}};
 
     ASYNC_RETAIN

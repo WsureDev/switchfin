@@ -8,6 +8,7 @@
 #include <view/presenter.hpp>
 
 class RecylingVideo;
+class RecyclingGrid;
 
 class HomeTab : public AttachedView, public Presenter {
 public:
@@ -26,4 +27,5 @@ private:
     BRLS_BIND(RecylingVideo, showNextup, "home/show/nextup");
 
     std::vector<RecylingVideo*> latest;
+    RecyclingGrid* fnOSGrid = nullptr;  ///< fnOS media grid (managed separately from XML widgets)
 };

@@ -1,5 +1,6 @@
 #include "activity/player_view.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/dialog.hpp"
 #include "utils/misc.hpp"
 #include "view/danmaku_core.hpp"
@@ -121,6 +122,35 @@ PlayerView::~PlayerView() {
 }
 
 void PlayerView::setSeries(const std::string& seriesId) {
+    if (AppConfig::instance().isFnTV()) {
+        // ── fnOS: load episode list ───────────────────────────────────────────
+        ASYNC_RETAIN
+        fnos::getJSON<std::vector<fnos::PlayListItem>>(
+            [ASYNC_TOKEN](const std::vector<fnos::PlayListItem>& items) {
+                ASYNC_RELEASE
+                int index = -1;
+                std::vector<std::string> values;
+                std::vector<jellyfin::Episode> eps;
+                eps.reserve(items.size());
+                for (size_t i = 0; i < items.size(); i++) {
+                    auto& item = items.at(i);
+                    if (item.guid == this->itemId) index = static_cast<int>(i);
+                    values.push_back(
+                        fmt::format("S{}E{} - {}", item.season_number, item.episode_number, item.title));
+                    eps.push_back(fnos::toJellyfinEpisode(item));
+                }
+                view->setList(values, index);
+                this->episodes = std::move(eps);
+            },
+            [ASYNC_TOKEN](const std::string& error) {
+                ASYNC_RELEASE
+                Dialog::show(error);
+            },
+            fnos::apiEpisodeList, seriesId);
+        return;
+    }
+
+    // ── Jellyfin: original episode list ──────────────────────────────────────
     std::string query = HTTP::encode_form({
         {"isVirtualUnaired", "false"},
         {"isMissing", "false"},
@@ -174,6 +204,65 @@ bool PlayerView::playIndex(int index) {
 }
 
 void PlayerView::playMedia(const uint64_t seekTicks) {
+    if (AppConfig::instance().isFnTV()) {
+        // ── fnOS: play/info → media/range direct stream ───────────────────────
+        ASYNC_RETAIN
+        fnos::postJSON<fnos::PlayInfo>(
+            {{"item_guid", this->itemId}},
+            [ASYNC_TOKEN, seekTicks](const fnos::PlayInfo& info) {
+                ASYNC_RELEASE
+
+                // media_guid is required for the streaming URL; guid is the item guid
+                if (info.media_guid.empty()) {
+                    brls::Logger::error("fnOS: play/info returned empty media_guid for item {}", info.guid);
+                    Dialog::show("fnOS: empty media_guid", []() { VideoView::close(); });
+                    return;
+                }
+
+                auto& mpv = MPVCore::instance();
+                auto& svr = AppConfig::instance().getUrl();
+
+                std::string mediaPath = fmt::format(fmt::runtime(fnos::apiMediaRange), info.media_guid);
+                std::string mediaUrl  = svr + mediaPath;
+
+                std::stringstream ssextra;
+                ssextra << fmt::format("network-timeout={}", HTTP::TIMEOUT / 100);
+
+                // info.ts is in **seconds**; convert to ticks for consistency with Jellyfin seek
+                uint64_t resumeTicks = seekTicks > 0
+                                       ? seekTicks
+                                       : static_cast<uint64_t>(info.ts * jellyfin::PLAYTICKS);
+                if (resumeTicks > 0)
+                    ssextra << ",start=" << misc::sec2Time(resumeTicks / jellyfin::PLAYTICKS);
+
+                if (HTTP::PROXY_STATUS) ssextra << ",http-proxy=\"" << HTTP::PROXY << "\"";
+
+                // Pass fnOS auth headers to MPV for range requests
+                std::string token = AppConfig::instance().getToken();
+                if (!token.empty()) {
+                    ssextra << ",http-header-fields=\"Authorization: " << token
+                            << ",Cookie: mode=relay\"";
+                }
+
+                this->playMethod    = jellyfin::methodDirectPlay;
+                this->playSessionId = info.media_guid;
+                this->stream.Id     = info.media_guid;
+                this->stream.Name   = info.item.title;
+                this->stream.Bitrate = 0;
+
+                brls::Logger::info("fnOS play: {} (media_guid={})", mediaUrl, info.media_guid);
+                mpv.setUrl(mediaUrl, ssextra.str());
+                view->getProfile()->init(this->playMethod);
+            },
+            [ASYNC_TOKEN](const std::string& ex) {
+                ASYNC_RELEASE
+                Dialog::show(ex, []() { VideoView::close(); });
+            },
+            fnos::apiPlayInfo);
+        return;
+    }
+
+    // ── Jellyfin: original PlaybackInfo logic ─────────────────────────────────
 #if defined(__PS4__)
     int maxAllowedHeight = 1080;
 #elif defined(__PSV__)
@@ -371,6 +460,13 @@ void PlayerView::playMedia(const uint64_t seekTicks) {
 }
 
 void PlayerView::reportStart() {
+    if (AppConfig::instance().isFnTV()) {
+        int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().playback_time * 1000.0);
+        fnos::postJSON<nlohmann::json>(
+            {{"item_guid", this->itemId}, {"ts", ts_ms}},
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+        return;
+    }
     uint64_t ticks = MPVCore::instance().playback_time * jellyfin::PLAYTICKS;
     jellyfin::postJSON(
         {
@@ -385,6 +481,15 @@ void PlayerView::reportStart() {
 }
 
 void PlayerView::reportStop() {
+    if (AppConfig::instance().isFnTV()) {
+        int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().playback_time * 1000.0);
+        fnos::postJSON<nlohmann::json>(
+            {{"item_guid", this->itemId}, {"ts", ts_ms}},
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+        brls::Logger::debug("PlayerView reportStop fnOS {}", this->itemId);
+        this->playSessionId.clear();
+        return;
+    }
     uint64_t ticks = MPVCore::instance().playback_time * jellyfin::PLAYTICKS;
     jellyfin::postJSON(
         {
@@ -400,6 +505,15 @@ void PlayerView::reportStop() {
 }
 
 void PlayerView::reportPlay(bool isPaused) {
+    if (AppConfig::instance().isFnTV()) {
+        // fnOS play/record only records position; pause state is not a separate API call.
+        if (isPaused) return;
+        int64_t ts_ms = static_cast<int64_t>(MPVCore::instance().video_progress * 1000.0);
+        fnos::postJSON<nlohmann::json>(
+            {{"item_guid", this->itemId}, {"ts", ts_ms}},
+            []([[maybe_unused]] const nlohmann::json&) {}, nullptr, fnos::apiPlayRecord);
+        return;
+    }
     uint64_t ticks = MPVCore::instance().video_progress * jellyfin::PLAYTICKS;
     jellyfin::postJSON(
         {
@@ -415,6 +529,15 @@ void PlayerView::reportPlay(bool isPaused) {
 
 /// 获取视频弹幕
 void PlayerView::requestDanmaku() {
+    if (AppConfig::instance().isFnTV()) {
+        // fnOS does not have a Danmaku endpoint
+        brls::sync([this]() {
+            DanmakuCore::instance().reset();
+            view->setDanmakuEnable(brls::Visibility::GONE);
+        });
+        return;
+    }
+
     ASYNC_RETAIN
     brls::async([ASYNC_TOKEN]() {
         auto& c = AppConfig::instance();

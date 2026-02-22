@@ -55,6 +55,7 @@ namespace fs = std::experimental::filesystem;
 #include <borealis/core/cache_helper.hpp>
 #include <borealis/views/edit_text_dialog.hpp>
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/config.hpp"
 #include "utils/keybind.hpp"
 #include "utils/misc.hpp"
@@ -526,7 +527,7 @@ void AppConfig::save() {
 
 bool AppConfig::checkLogin() {
     for (auto& s : this->servers) {
-        if (s.id.empty() && s.urls.size() > 0) {
+        if (s.id.empty() && !s.urls.empty() && s.type != "fntv") {
             try {
                 std::string url = s.urls.front() + jellyfin::apiPublicInfo;
                 std::string resp = HTTP::get(url, HTTP::Timeout{3000});
@@ -537,6 +538,9 @@ bool AppConfig::checkLogin() {
                 brls::Logger::warning("AppConfig {} checkServer: {}", s.urls.front(), ex.what());
                 return false;
             }
+        } else if (s.id.empty() && !s.urls.empty() && s.type == "fntv") {
+            // fnOS servers use their URL as the stable ID
+            s.id = s.urls.front();
         }
     }
 
@@ -549,6 +553,44 @@ bool AppConfig::checkLogin() {
     if (it == this->servers.end()) return false;
 
     this->server_url = it->urls.front();
+
+    if (it->type == "fntv") {
+        // fnOS: verify token by calling user/info with Authx signing
+        auto doVerify = [this]() -> bool {
+            fnos::AuthxData ax = fnos::genAuthx(fnos::apiUserInfo);
+            HTTP::Header header = {
+                "Content-Type: application/json",
+                "Cookie: mode=relay",
+                "Authx: " + ax.header,
+                "Authorization: " + this->user->access_token,
+            };
+            try {
+                std::string resp = HTTP::get(this->server_url + fnos::apiUserInfo, header, HTTP::Timeout{});
+                brls::Logger::debug("fnOS checkLogin user/info -> {} bytes", resp.size());
+                fnos::Response<fnos::UserInfo> r = nlohmann::json::parse(resp);
+                if (r.code != 0) {
+                    brls::Logger::warning("fnOS checkLogin user/info: code={} msg={}", r.code, r.msg);
+                    return false;
+                }
+                if (!r.data.nickname.empty()) this->user->name = r.data.nickname;
+                else if (!r.data.username.empty()) this->user->name = r.data.username;
+                return true;
+            } catch (const std::exception& ex) {
+                brls::Logger::warning("AppConfig {} checkLogin fnOS: {}", this->server_url, ex.what());
+                return false;
+            }
+        };
+
+        if (doVerify()) return true;
+
+        // Token may have expired — try to refresh with stored credentials.
+        // refreshFnTVToken() re-fetches user info internally; if it succeeds
+        // the token is already valid so we don't need a second doVerify() call.
+        brls::Logger::info("fnOS: token verification failed, attempting refresh");
+        return this->refreshFnTVToken();
+    }
+
+    // Jellyfin: verify via /Users/{id}
     HTTP::Header header = {this->getAuth(this->user->access_token)};
     std::string uri = fmt::format("{}/Users/{}", this->server_url, this->user_id);
     try {
@@ -564,6 +606,14 @@ bool AppConfig::checkLogin() {
 }
 
 bool AppConfig::checkDanmuku() {
+    if (this->isFnTV()) {
+        // fnOS does not have a Danmaku plugin; fall back to locale-based default
+        const std::string locale = brls::Application::getPlatform()->getLocale();
+        bool enable = (locale == brls::LOCALE_ZH_HANS) || (locale == brls::LOCALE_ZH_HANT);
+        DanmakuCore::PLUGIN_ACTIVE = this->getItem(DANMAKU, enable);
+        brls::Logger::info("fnOS: Danmaku plugin not available, fallback ({})", DanmakuCore::PLUGIN_ACTIVE);
+        return false;
+    }
     jellyfin::getJSON<jellyfin::PluginList>(
         [](const jellyfin::PluginList& plugins) {
             for (auto& p : plugins) {
@@ -746,6 +796,84 @@ const std::vector<AppUser> AppConfig::getUsers(const std::string& id) const {
         }
     }
     return users;
+}
+
+bool AppConfig::isFnTV() const {
+    if (this->server_url.empty()) return false;
+    for (auto& s : this->servers) {
+        if (!s.urls.empty() && s.urls.front() == this->server_url)
+            return s.type == "fntv";
+    }
+    return false;
+}
+
+std::string AppConfig::getServerType(const std::string& url) const {
+    for (auto& s : this->servers) {
+        for (auto& u : s.urls) {
+            if (u == url) return s.type;
+        }
+    }
+    return "jellyfin";
+}
+
+bool AppConfig::refreshFnTVToken() {
+    if (this->user == this->users.end()) return false;
+    if (this->user->fntv_password.empty() || this->user->fntv_username.empty()) {
+        brls::Logger::warning("fnOS refreshToken: no stored credentials for user '{}'", this->user->name);
+        return false;
+    }
+
+    brls::Logger::info("fnOS refreshToken: re-logging in as '{}'", this->user->fntv_username);
+
+    nlohmann::json data = {
+        {"app_name", "trimemedia-web"},
+        {"username", this->user->fntv_username},
+        {"password", this->user->fntv_password},
+    };
+    std::string rawJson  = data.dump();
+    fnos::AuthxData ax   = fnos::genAuthx(fnos::apiLogin, rawJson);
+    nlohmann::json body  = data;
+    body["nonce"]        = ax.nonce;
+    HTTP::Header hdr = {
+        "Content-Type: application/json",
+        "Cookie: mode=relay",
+        "Authx: " + ax.header,
+    };
+    try {
+        std::string resp = HTTP::post(this->server_url + fnos::apiLogin, body.dump(), hdr, HTTP::Timeout{5000});
+        brls::Logger::debug("fnOS refreshToken response: {} bytes", resp.size());
+        fnos::Response<fnos::LoginResult> r = nlohmann::json::parse(resp);
+        if (r.code != 0 || r.data.token.empty()) {
+            brls::Logger::warning("fnOS refreshToken failed: code={} msg={}", r.code, r.msg);
+            return false;
+        }
+        this->user->access_token = r.data.token;
+        this->save();
+        brls::Logger::info("fnOS refreshToken: new token obtained, verifying user info");
+
+        // Confirm the new token works and update display name from server
+        fnos::AuthxData axVerify = fnos::genAuthx(fnos::apiUserInfo);
+        HTTP::Header verifyHdr = {
+            "Content-Type: application/json",
+            "Cookie: mode=relay",
+            "Authx: " + axVerify.header,
+            "Authorization: " + r.data.token,
+        };
+        try {
+            std::string infoResp = HTTP::get(this->server_url + fnos::apiUserInfo, verifyHdr, HTTP::Timeout{5000});
+            fnos::Response<fnos::UserInfo> ui = nlohmann::json::parse(infoResp);
+            if (ui.code == 0) {
+                if (!ui.data.nickname.empty()) this->user->name = ui.data.nickname;
+                else if (!ui.data.username.empty()) this->user->name = ui.data.username;
+            }
+        } catch (const std::exception& ex) {
+            brls::Logger::warning("fnOS refreshToken: user/info check failed ({}), token saved anyway", ex.what());
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        brls::Logger::warning("fnOS refreshToken exception: {}", ex.what());
+        return false;
+    }
 }
 
 void AppConfig::addColor(const brls::ThemeVariant tv, const std::string& name, NVGcolor defaultColor) {

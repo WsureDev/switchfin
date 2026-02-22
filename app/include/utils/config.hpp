@@ -27,15 +27,22 @@ struct AppUser {
     std::string server_id;
     bool is_admin = false;
     jellyfin::UserConfig config;
+    /// @brief fnOS login username (empty for Jellyfin users). Used to re-acquire an expired token.
+    std::string fntv_username;
+    /// @brief fnOS login password (empty for Jellyfin users). Used to re-acquire an expired token.
+    std::string fntv_password;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AppUser, id, name, access_token, server_id);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(AppUser, id, name, access_token, server_id,
+    fntv_username, fntv_password);
 
 struct AppServer {
     std::string name;
     std::string id;
     std::vector<std::string> urls;
+    /// @brief Server backend type: "jellyfin" (default) or "fntv"
+    std::string type = "jellyfin";
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(AppServer, id, name, urls);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(AppServer, id, name, urls, type);
 
 struct AppRemote {
     std::string name;
@@ -181,6 +188,17 @@ public:
     const std::vector<AppRemote>& getRemotes() const { return this->remotes; }
     const std::vector<AppServer>& getServers() const { return this->servers; }
     const std::vector<AppUser> getUsers(const std::string& id) const;
+
+    /// @brief Returns true if the current server is a fnOS (飞牛影视) server.
+    bool isFnTV() const;
+    /// @brief Returns the type ("jellyfin" or "fntv") of the server whose URL matches @p url.
+    std::string getServerType(const std::string& url) const;
+    /**
+     * @brief For fnOS: re-login with stored credentials to get a fresh token.
+     * Called automatically when a request fails with an auth error.
+     * @return true if a new token was obtained and saved.
+     */
+    bool refreshFnTVToken();
 
     NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(AppConfig, user_id, device, users, servers, setting, remotes);
 

@@ -7,6 +7,7 @@
 #include "utils/config.hpp"
 #include "utils/dialog.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 
 using namespace brls::literals;  // for _i18n
 
@@ -39,6 +40,7 @@ bool ServerAdd::onConnect() {
 
     ASYNC_RETAIN
     brls::async([ASYNC_TOKEN, baseUrl]() {
+        // Try Jellyfin first
         try {
             auto resp = HTTP::get(baseUrl + jellyfin::apiPublicInfo, HTTP::Timeout{3000});
             jellyfin::PublicSystemInfo info = nlohmann::json::parse(resp);
@@ -46,6 +48,38 @@ bool ServerAdd::onConnect() {
                 .name = info.ServerName,
                 .id = info.Id,
                 .urls = {baseUrl},
+                .type = "jellyfin",
+            };
+            brls::sync([ASYNC_TOKEN, s]() {
+                ASYNC_RELEASE
+                brls::View* view = new ServerLogin(s.name, s.urls.front());
+                AppConfig::instance().addServer(s);
+                brls::Application::unblockInputs();
+                this->present(view);
+            });
+            return;
+        } catch (const std::exception& ex) {
+            brls::Logger::debug("ServerAdd: not Jellyfin ({}), trying fnOS...", ex.what());
+        }
+
+        // Fallback: try fnOS sys/config
+        try {
+            fnos::AuthxData ax = fnos::genAuthx(fnos::apiSysConfig);
+            HTTP::Header hdr = {
+                "Content-Type: application/json",
+                "Cookie: mode=relay",
+                "Authx: " + ax.header,
+            };
+            auto resp = HTTP::get(baseUrl + fnos::apiSysConfig, hdr, HTTP::Timeout{3000});
+            fnos::Response<fnos::SysConfig> r = nlohmann::json::parse(resp);
+            if (r.code != 0) throw std::runtime_error(r.msg);
+
+            std::string serverName = r.data.hostname.empty() ? baseUrl : r.data.hostname;
+            AppServer s = {
+                .name = serverName,
+                .id   = baseUrl,   // fnOS uses the URL as a stable ID
+                .urls = {baseUrl},
+                .type = "fntv",
             };
             brls::sync([ASYNC_TOKEN, s]() {
                 ASYNC_RELEASE

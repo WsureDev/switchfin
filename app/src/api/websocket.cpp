@@ -10,6 +10,7 @@ const std::string msgKeepAlive = R"({"MessageType":"KeepAlive"})";
 
 websocket::websocket(const std::string& url) {
 #if LIBCURL_VERSION_NUM >= 0x080000 && !defined(__PS4__)
+    this->url = url;
     this->easy = curl_easy_init();
     curl_easy_setopt(this->easy, CURLOPT_URL, url.c_str());
 
@@ -55,7 +56,7 @@ void* websocket::wsRecv(void* ptr) {
         CURLcode res = curl_easy_perform(p->easy);
         if (res == CURLE_OK) break;
         p->hb.stop();
-        brls::Logger::warning("ws perform failed: {}", curl_easy_strerror(res));
+        brls::Logger::warning("ws perform failed: {}\ncurl '{}'", curl_easy_strerror(res), p->url);
         retro_sleep(t);
     }
     brls::Logger::info("ws recv exit");

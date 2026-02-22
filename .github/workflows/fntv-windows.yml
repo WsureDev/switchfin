@@ -1,0 +1,91 @@
+name: FNTV Windows Build
+
+# Builds a Windows (x64) release whenever changes are pushed to the
+# copilot/port-switchfin-to-fntv branch, on PRs targeting main, or
+# manually via workflow_dispatch.
+
+on:
+  push:
+    branches:
+      - 'copilot/port-switchfin-to-fntv'
+      - 'fntv*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Target architecture
+        type: choice
+        default: x64
+        options:
+          - x64
+          - x86
+          - arm64
+
+jobs:
+  build-windows:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, sys: mingw64, env: x86_64, runner: windows-latest }
+          - { arch: arm64, sys: clangarm64, env: clang-aarch64, runner: windows-11-arm }
+
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: ${{ matrix.sys }}
+          path-type: inherit
+          cache: false
+          release: ${{ contains(matrix.sys, 'arm64') }}
+          install: >-
+            mingw-w64-${{ matrix.env }}-ninja
+            mingw-w64-${{ matrix.env }}-cc
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          for pkg in glfw-3.5.0-1 curl-8.16.0-1 mpv-0.41.0-1 libwebp-1.6.0-1; do
+            curl -sLO https://github.com/dragonflylee/switchfin/releases/download/mingw-packages/${MINGW_PACKAGE_PREFIX}-${pkg}-any.pkg.tar.zst
+          done
+          pacman -U --noconfirm *.pkg.tar.zst
+          curl -sLO https://github.com/rainers/cv2pdb/releases/download/v0.54/cv2pdb-0.54.zip
+          unzip cv2pdb-0.54.zip cv2pdb64.exe -d /usr/bin
+
+      - name: Build
+        env:
+          MSYS2_PATH_TYPE: inherit
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPLATFORM_DESKTOP=ON \
+            -DWIN32_TERMINAL=OFF \
+            -DZLIB_USE_STATIC_LIBS=ON \
+            -DUSE_SYSTEM_GLFW=ON \
+            -DUSE_D3D11=ON \
+            -DUSE_LIBROMFS=ON \
+            -DVERSION_BUILD=${{ github.run_number }}
+          cmake --build build
+          cv2pdb64 build/Switchfin.exe
+          cp -a README.md ${MINGW_PREFIX}/bin/libmpv-2.dll build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Switchfin-FNTV-windows-${{ matrix.arch }}-${{ github.run_number }}
+          path: |
+            build/Switchfin.exe
+            build/Switchfin.pdb
+            build/libmpv-2.dll
+            build/README.md

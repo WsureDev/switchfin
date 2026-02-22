@@ -31,4 +31,5 @@ private:
 #endif
     brls::RepeatingTimer hb;
     void *easy;
+    std::string url;
 };

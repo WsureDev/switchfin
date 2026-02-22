@@ -4,7 +4,11 @@
 
 #include "tab/home_tab.hpp"
 #include "view/recyling_video.hpp"
+#include "view/recycling_grid.hpp"
+#include "view/video_card.hpp"
+#include "view/video_source.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/keybind.hpp"
 
 using namespace brls::literals;  // for _i18n
@@ -14,6 +18,7 @@ HomeTab::HomeTab() {
     // Inflate the tab from the XML file
     this->inflateFromXMLRes("xml/tabs/home.xml");
 
+    // Jellyfin mode: configure the resume and nextup RecylingVideo widgets
     this->userResume->onQuery([](size_t start, size_t pageSize) {
         std::string query = HTTP::encode_form({
             {"enableImageTypes", "Primary,Backdrop,Thumb"},
@@ -37,6 +42,15 @@ HomeTab::HomeTab() {
         });
         return fmt::format(fmt::runtime(jellyfin::apiShowNextUp), query);
     });
+
+    // fnOS mode: create a grid and attach to boxHome (hidden until fnOS is active)
+    this->fnOSGrid = new RecyclingGrid();
+    this->fnOSGrid->setGrow(1.0f);
+    this->fnOSGrid->estimatedRowHeight = 300;
+    this->fnOSGrid->spanCount          = brls::getStyle().getMetric("app/grid/5");
+    this->fnOSGrid->registerCell("Cell", VideoCardCell::create);
+    this->fnOSGrid->setVisibility(brls::Visibility::GONE);
+    this->boxHome->addView(this->fnOSGrid);
 }
 
 HomeTab::~HomeTab() { brls::Logger::debug("View HomeTab: delete"); }
@@ -44,24 +58,76 @@ HomeTab::~HomeTab() { brls::Logger::debug("View HomeTab: delete"); }
 brls::View* HomeTab::create() { return new HomeTab(); }
 
 void HomeTab::doRequest() {
-    this->userResume->reset();
-    this->showNextup->reset();
-    this->userResume->doRequest();
-    this->showNextup->doRequest();
+    if (AppConfig::instance().isFnTV()) {
+        this->fnOSGrid->showSkeleton();
+        this->onCreate();
+    } else {
+        this->userResume->reset();
+        this->showNextup->reset();
+        this->userResume->doRequest();
+        this->showNextup->doRequest();
+    }
 }
 
 void HomeTab::onCreate() {
-    auto actionRefresh = [this](brls::View* view) {
-        this->userResume->doRequest(true);
-        this->showNextup->doRequest(true);
-        for (auto recyler : this->latest) {
-            recyler->doLatest(true);
+    auto actionRefresh = [this]([[maybe_unused]] brls::View* view) {
+        if (AppConfig::instance().isFnTV()) {
+            this->fnOSGrid->showSkeleton();
+            this->doRequest();
+        } else {
+            this->userResume->doRequest(true);
+            this->showNextup->doRequest(true);
+            for (auto recyler : this->latest) {
+                recyler->doLatest(true);
+            }
         }
         return true;
     };
 
     this->registerAction("hints/refresh"_i18n, brls::BUTTON_BACK, actionRefresh);
     this->registerAction(KeyBind::getRefresh(), actionRefresh);
+
+    if (AppConfig::instance().isFnTV()) {
+        // ── fnOS home: show all items from item/list ─────────────────────────
+        this->userResume->setVisibility(brls::Visibility::GONE);
+        this->showNextup->setVisibility(brls::Visibility::GONE);
+        this->fnOSGrid->setVisibility(brls::Visibility::VISIBLE);
+
+        this->fnOSGrid->showSkeleton();
+
+        ASYNC_RETAIN
+        fnos::postJSON<fnos::ItemListData>(
+            {{"parent_guid", ""}, {"sort_column", "ts"}, {"sort_type", "desc"}},
+            [ASYNC_TOKEN](const fnos::ItemListData& result) {
+                ASYNC_RELEASE
+                if (result.list.empty()) {
+                    this->fnOSGrid->setEmpty();
+                    return;
+                }
+                std::vector<jellyfin::Episode> eps;
+                eps.reserve(result.list.size());
+                for (auto& it : result.list)
+                    eps.push_back(fnos::toJellyfinEpisode(it));
+                this->fnOSGrid->setDataSource(new VideoDataSource(eps));
+            },
+            [ASYNC_TOKEN](const std::string& ex) {
+                ASYNC_RELEASE
+                this->fnOSGrid->setError(ex);
+                auto dialog = new brls::Dialog(ex);
+                dialog->addButton("hints/retry"_i18n, [this]() {
+                    brls::sync([this]() { this->doRequest(); });
+                });
+                dialog->addButton("hints/cancel"_i18n, []() {});
+                dialog->open();
+            },
+            fnos::apiItemList);
+        return;
+    }
+
+    // ── Jellyfin home: original behavior ─────────────────────────────────────
+    this->userResume->setVisibility(brls::Visibility::VISIBLE);
+    this->showNextup->setVisibility(brls::Visibility::VISIBLE);
+    this->fnOSGrid->setVisibility(brls::Visibility::GONE);
 
     ASYNC_RETAIN
     jellyfin::getJSON<jellyfin::Result<jellyfin::Collection>>(

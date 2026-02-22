@@ -8,6 +8,7 @@
 #include "view/recycling_grid.hpp"
 #include "view/auto_tab_frame.hpp"
 #include "api/jellyfin.hpp"
+#include "api/fnos.hpp"
 #include "utils/image.hpp"
 #include "utils/keybind.hpp"
 
@@ -38,6 +39,8 @@ public:
     brls::Image* picture = new brls::Image();
     brls::Label* labelTitle = new brls::Label();
 };
+
+// ─── Jellyfin MediaFolderDataSource ──────────────────────────────────────────
 
 class MediaFolderDataSource : public RecyclingGridDataSource {
 public:
@@ -98,6 +101,53 @@ private:
     MediaList list;
 };
 
+// ─── fnOS MediaFolderDataSource ──────────────────────────────────────────────
+
+class FnOSFolderDataSource : public RecyclingGridDataSource {
+public:
+    using MediaList = std::vector<fnos::PlayListItem>;
+
+    FnOSFolderDataSource(const MediaList& r) : list(r) {
+        brls::Logger::debug("FnOSFolderDataSource: create {}", r.size());
+    }
+
+    size_t getItemCount() override { return this->list.size(); }
+
+    RecyclingGridItem* cellForRow(RecyclingView* recycler, size_t index) override {
+        MediaFolderCell* cell = dynamic_cast<MediaFolderCell*>(recycler->dequeueReusableCell("Cell"));
+        auto& item = this->list.at(index);
+
+        if (!item.poster.empty()) {
+            // poster may be an absolute path like "/v/api/..." or a full URL
+            std::string posterUrl = item.poster;
+            if (!posterUrl.empty() && posterUrl.front() == '/')
+                posterUrl = AppConfig::instance().getUrl() + posterUrl;
+            Image::with(cell->picture, posterUrl);
+            cell->labelTitle->setVisibility(brls::Visibility::GONE);
+            cell->picture->setVisibility(brls::Visibility::VISIBLE);
+        } else {
+            cell->labelTitle->setText(item.title.empty() ? item.tv_title  // tv_title is the series name for episodes
+                                                          : item.title);
+            cell->labelTitle->setVisibility(brls::Visibility::VISIBLE);
+            cell->picture->setVisibility(brls::Visibility::GONE);
+        }
+        return cell;
+    }
+
+    void onItemSelected(brls::Box* recycler, size_t index) override {
+        auto& item = this->list.at(index);
+        // All fnOS items are treated as generic collections for now
+        recycler->present(new MediaCollection(item.guid));
+    }
+
+    void clearData() override { this->list.clear(); }
+
+private:
+    MediaList list;
+};
+
+// ─── MediaFolders ────────────────────────────────────────────────────────────
+
 MediaFolders::MediaFolders() {
     // Inflate the tab from the XML file
     this->inflateFromXMLRes("xml/tabs/media_folder.xml");
@@ -122,6 +172,36 @@ void MediaFolders::onCreate() {
 }
 
 void MediaFolders::doRequest() {
+    if (AppConfig::instance().isFnTV()) {
+        // ── fnOS: load library root via item/list ─────────────────────────────
+        ASYNC_RETAIN
+        fnos::postJSON<fnos::ItemListData>(
+            {{"parent_guid", ""}, {"sort_column", "title"}, {"sort_type", "asc"}},
+            [ASYNC_TOKEN](const fnos::ItemListData& result) {
+                ASYNC_RELEASE
+                if (result.list.empty())
+                    this->recycler->setEmpty();
+                else
+                    this->recycler->setDataSource(new FnOSFolderDataSource(result.list));
+            },
+            [ASYNC_TOKEN](const std::string& ex) {
+                ASYNC_RELEASE
+                this->recycler->setError(ex);
+                auto dialog = new brls::Dialog(ex);
+                dialog->addButton("hints/retry"_i18n, [this]() {
+                    brls::sync([this]() {
+                        this->recycler->showSkeleton();
+                        this->doRequest();
+                    });
+                });
+                dialog->addButton("hints/cancel"_i18n, []() {});
+                dialog->open();
+            },
+            fnos::apiItemList);
+        return;
+    }
+
+    // ── Jellyfin: original behavior ───────────────────────────────────────────
     ASYNC_RETAIN
     jellyfin::getJSON<jellyfin::Result<jellyfin::Collection>>(
         [ASYNC_TOKEN](const jellyfin::Result<jellyfin::Collection>& r) {
