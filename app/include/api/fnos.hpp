@@ -23,6 +23,10 @@
 #include <sstream>
 #include <vector>
 
+// Forward-declare ThreadPool so we can check stopping() without pulling in the full header
+// (the full header is included indirectly via "utils/config.hpp" → "utils/thread.hpp").
+#include "utils/thread.hpp"
+
 namespace fnos {
 
 // ─── Fixed API credentials ────────────────────────────────────────────────────
@@ -179,6 +183,20 @@ inline HTTP::Header buildHeaders(const std::string& urlPath, const std::string& 
 }
 
 /**
+ * @brief Build a curl command string from request parameters, for debug logging.
+ * Sensitive auth tokens are included since this is only printed at ERROR level.
+ */
+inline std::string buildCurlCmd(const std::string& method, const std::string& url,
+                                  const HTTP::Header& headers, const std::string& body = "") {
+    std::string cmd = "curl -X " + method + " '" + url + "'";
+    for (const auto& h : headers)
+        cmd += " -H '" + h + "'";
+    if (!body.empty())
+        cmd += " -d '" + body + "'";
+    return cmd;
+}
+
+/**
  * @brief Async GET, unwraps the fnOS {code, msg, data} envelope.
  */
 template <typename Result, typename... Args>
@@ -188,8 +206,9 @@ inline void getJSON(const std::function<void(Result)>& then, OnError error,
     brls::async([then, error, urlPath]() {
         auto&        c     = AppConfig::instance();
         HTTP::Header hdr   = buildHeaders(urlPath, "", c.getToken());
+        std::string  fullUrl = c.getUrl() + urlPath;
         try {
-            std::string resp = HTTP::get(c.getUrl() + urlPath, hdr, HTTP::Timeout{});
+            std::string resp = HTTP::get(fullUrl, hdr, HTTP::Timeout{});
             brls::Logger::debug("fnOS GET {} -> {} bytes", urlPath, resp.size());
             if (resp.empty()) return;
             auto j = nlohmann::json::parse(resp);
@@ -199,10 +218,13 @@ inline void getJSON(const std::function<void(Result)>& then, OnError error,
                 brls::Logger::warning("fnOS GET {} failed: code={} msg={}", urlPath, r.code, r.msg);
                 throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
             }
-            if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
+            if (then && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
             brls::Logger::error("fnOS GET {} exception: {}", urlPath, ex.what());
-            if (error) brls::sync(std::bind(error, std::string(ex.what())));
+            brls::Logger::error("  curl: {}", buildCurlCmd("GET", fullUrl, hdr));
+            if (error && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(error, std::string(ex.what())));
         }
     });
 }
@@ -236,9 +258,10 @@ inline void postJSON(const nlohmann::json& data,
         };
         std::string token = c.getToken();
         if (!token.empty()) hdr.push_back("Authorization: " + token);
+        std::string fullUrl = c.getUrl() + urlPath;
 
         try {
-            std::string resp = HTTP::post(c.getUrl() + urlPath, bodyStr, hdr, HTTP::Timeout{});
+            std::string resp = HTTP::post(fullUrl, bodyStr, hdr, HTTP::Timeout{});
             brls::Logger::debug("fnOS POST {} -> {} bytes{}", urlPath, resp.size(), isRetry ? " (retry)" : "");
             if (resp.empty()) return false;  // returns false = "failed, don't retry"
             auto j = nlohmann::json::parse(resp);
@@ -254,11 +277,14 @@ inline void postJSON(const nlohmann::json& data,
                 brls::Logger::warning("fnOS POST {} failed: code={} msg={}", urlPath, r.code, r.msg);
                 throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
             }
-            if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
+            if (then && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(std::move(then), std::move(r.data)));
             return false;  // success
         } catch (const std::exception& ex) {
             brls::Logger::error("fnOS POST {} exception: {}", urlPath, ex.what());
-            if (error) brls::sync(std::bind(error, std::string(ex.what())));
+            brls::Logger::error("  curl: {}", buildCurlCmd("POST", fullUrl, hdr, bodyStr));
+            if (error && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(error, std::string(ex.what())));
             return false;
         }
     };
@@ -288,8 +314,9 @@ inline void postJSONPublic(const std::string& baseUrl, const nlohmann::json& dat
             "Cookie: mode=relay",
             "Authx: " + ax.header,
         };
+        std::string fullUrl = baseUrl + urlPath;
         try {
-            std::string resp = HTTP::post(baseUrl + urlPath, bodyStr, hdr, HTTP::Timeout{});
+            std::string resp = HTTP::post(fullUrl, bodyStr, hdr, HTTP::Timeout{});
             brls::Logger::debug("fnOS POST(public) {} -> {} bytes", urlPath, resp.size());
             if (resp.empty()) return;
             auto j = nlohmann::json::parse(resp);
@@ -299,10 +326,13 @@ inline void postJSONPublic(const std::string& baseUrl, const nlohmann::json& dat
                 brls::Logger::warning("fnOS POST(public) {} failed: code={} msg={}", urlPath, r.code, r.msg);
                 throw std::runtime_error(r.msg.empty() ? fmt::format("fnOS error {}", r.code) : r.msg);
             }
-            if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
+            if (then && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
             brls::Logger::error("fnOS POST(public) {} exception: {}", urlPath, ex.what());
-            if (error) brls::sync(std::bind(error, std::string(ex.what())));
+            brls::Logger::error("  curl: {}", buildCurlCmd("POST", fullUrl, hdr, bodyStr));
+            if (error && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(error, std::string(ex.what())));
         }
     });
 }
@@ -315,14 +345,21 @@ inline void getJSONPublic(const std::string& baseUrl, const std::string& urlPath
                           const std::function<void(Result)>& then, OnError error) {
     brls::async([then, error, baseUrl, urlPath]() {
         HTTP::Header hdr = buildHeaders(urlPath);
+        std::string fullUrl = baseUrl + urlPath;
         try {
-            std::string resp = HTTP::get(baseUrl + urlPath, hdr, HTTP::Timeout{});
+            std::string resp = HTTP::get(fullUrl, hdr, HTTP::Timeout{});
             if (resp.empty()) return;
-            Response<Result> r = nlohmann::json::parse(resp);
+            auto j = nlohmann::json::parse(resp);
+            brls::Logger::debug("fnOS GET(public) {} code={}", urlPath, j.value("code", -1));
+            Response<Result> r = j;
             if (r.code != 0) throw std::runtime_error(r.msg);
-            if (then) brls::sync(std::bind(std::move(then), std::move(r.data)));
+            if (then && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(std::move(then), std::move(r.data)));
         } catch (const std::exception& ex) {
-            if (error) brls::sync(std::bind(error, std::string(ex.what())));
+            brls::Logger::error("fnOS GET(public) {} exception: {}", urlPath, ex.what());
+            brls::Logger::error("  curl: {}", buildCurlCmd("GET", fullUrl, hdr));
+            if (error && !ThreadPool::instance().stopping())
+                brls::sync(std::bind(error, std::string(ex.what())));
         }
     });
 }

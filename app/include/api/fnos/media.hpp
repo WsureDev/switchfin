@@ -51,10 +51,65 @@ struct PlayListItem {
     std::string douban_id;
     std::string trim_id;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PlayListItem, guid, lan, title, tv_title,
-    parent_guid, parent_title, type, poster, poster_width, poster_height,
-    vote_average, runtime, overview, is_favorite, season_number, episode_number,
-    duration, ts, imdb_id, douban_id, trim_id);
+
+namespace detail {
+
+/// @brief Read a field that the server may return as either a JSON number or a
+/// string-encoded number (e.g. `"vote_average": "8.5"`).
+template <typename T>
+inline T jsonNum(const nlohmann::json& j, const char* key, T def = T{}) {
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) return def;
+    if (it->is_number())  return it->get<T>();
+    if (it->is_boolean()) return static_cast<T>(it->get<bool>());
+    if (it->is_string()) {
+        const std::string& s = it->get_ref<const std::string&>();
+        if (s.empty()) return def;
+        try {
+            if constexpr (std::is_floating_point_v<T>)
+                return static_cast<T>(std::stod(s));
+            else
+                return static_cast<T>(std::stoll(s));
+        } catch (...) {}
+    }
+    return def;
+}
+
+} // namespace detail
+
+/// @brief Custom deserialiser for PlayListItem.
+/// Handles the common case where the fnOS server encodes numeric fields as JSON
+/// strings (e.g. `"vote_average": "8.5"` instead of `"vote_average": 8.5`).
+/// String fields are accepted only when the JSON value is actually a string.
+inline void from_json(const nlohmann::json& j, PlayListItem& p) {
+    auto str = [&](const char* k, std::string& f) {
+        auto it = j.find(k);
+        if (it != j.end() && !it->is_null() && it->is_string())
+            f = it->get<std::string>();
+    };
+    str("guid",         p.guid);
+    str("lan",          p.lan);
+    str("title",        p.title);
+    str("tv_title",     p.tv_title);
+    str("parent_guid",  p.parent_guid);
+    str("parent_title", p.parent_title);
+    str("type",         p.type);
+    str("poster",       p.poster);
+    str("overview",     p.overview);
+    str("imdb_id",      p.imdb_id);
+    str("douban_id",    p.douban_id);
+    str("trim_id",      p.trim_id);
+
+    p.poster_width   = detail::jsonNum<int>(j,    "poster_width");
+    p.poster_height  = detail::jsonNum<int>(j,    "poster_height");
+    p.vote_average   = detail::jsonNum<float>(j,  "vote_average");
+    p.runtime        = detail::jsonNum<int>(j,    "runtime");
+    p.is_favorite    = detail::jsonNum<int>(j,    "is_favorite");
+    p.season_number  = detail::jsonNum<int>(j,    "season_number");
+    p.episode_number = detail::jsonNum<int>(j,    "episode_number");
+    p.duration       = detail::jsonNum<double>(j, "duration");
+    p.ts             = detail::jsonNum<double>(j, "ts");
+}
 
 /// @brief Wrapper for the item/list response.
 /// The API returns {"code":0,"data":{"list":[...],"total":N,...}} so the

@@ -39,6 +39,9 @@ public:
 
     static size_t max_thread_num;
 
+    /// @brief Returns true once stop() has been called (app is shutting down).
+    bool stopping() const { return this->isStop.load(); }
+
 private:
     static void* task_loop(void*);
 
