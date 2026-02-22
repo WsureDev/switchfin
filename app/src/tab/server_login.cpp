@@ -182,7 +182,7 @@ bool ServerLogin::onSignin() {
         ASYNC_RETAIN
         fnos::postJSONPublic<fnos::LoginResult>(
             loginUrl, data,
-            [ASYNC_TOKEN, loginUrl](const fnos::LoginResult& r) {
+            [ASYNC_TOKEN, loginUrl, username, password](const fnos::LoginResult& r) {
                 ASYNC_RELEASE
                 if (r.token.empty()) {
                     this->btnSignin->setState(brls::ButtonState::ENABLED);
